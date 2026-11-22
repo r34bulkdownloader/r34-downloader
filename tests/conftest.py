@@ -43,6 +43,8 @@ def _no_real_searches(request, monkeypatch):
         from r34dl import api
         # ApiClient.fetch, not Rule34Site.fetch: tests patch win.api.fetch to see what the site asked for
         monkeypatch.setattr(api.ApiClient, "fetch", lambda self, *a, **k: None)
+        from r34dl.sites.ehclient import EhQueue
+        monkeypatch.setattr(EhQueue, "_add", lambda self, *a, **k: None)  # e-hentai: nothing is ever sent
         # Windows built without the `win` fixture still need (fake) credentials, or they open Settings and wait.
         from r34dl import config
         config.save({**config.DEFAULTS, "user_id": "1", "api_key": "k"})

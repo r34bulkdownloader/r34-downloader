@@ -1,0 +1,247 @@
+"""The paced e-hentai client and Site, against a fake network manager (never the real site)."""
+import time
+from pathlib import Path
+
+from PySide6.QtCore import QEventLoop, QObject, QTimer, QUrl, Signal
+from PySide6.QtNetwork import QNetworkReply, QNetworkRequest
+
+from r34dl import api
+from r34dl.models import Post
+from r34dl.sites import ehclient, ehentai
+from r34dl.sites.ehclient import EhentaiSite, EhQueue
+
+FIX = Path(__file__).parent / "fixtures" / "eh"
+
+
+class FakeReply(QObject):
+    finished = Signal()
+
+    def __init__(self, url, status, body, err=QNetworkReply.NoError):
+        super().__init__()
+        self._url, self._status, self._body, self._err = QUrl(url), status, body, err
+
+    def attribute(self, a):
+        return self._status if a == QNetworkRequest.HttpStatusCodeAttribute else None
+
+    def error(self):
+        return self._err
+
+    def errorString(self):
+        return "boom"
+
+    def readAll(self):
+        return self._body
+
+    def url(self):
+        return self._url
+
+
+class FakeNam:
+    """Serves `routes` (url substring -> (status, body) or list of them, used in turn); records each send."""
+
+    def __init__(self, routes):
+        self.routes, self.sent, self.open, self.max_open = routes, [], 0, 0
+
+    def _reply(self, req, body=None):
+        url = req.url().toString()
+        self.sent.append((time.monotonic(), url, bytes(req.rawHeader("Cookie")), body))
+        self.open += 1
+        self.max_open = max(self.max_open, self.open)
+        key = next(k for k in self.routes if k in url)
+        r = self.routes[key]
+        status, data = r.pop(0) if isinstance(r, list) else r
+        reply = FakeReply(url, status, data)
+
+        def fin():
+            self.open -= 1
+            reply.finished.emit()
+        QTimer.singleShot(5, fin)
+        return reply
+
+    def get(self, req):
+        return self._reply(req)
+
+    def post(self, req, body):
+        return self._reply(req, bytes(body))
+
+
+def spin_until(cond, timeout=10):
+    end = time.monotonic() + timeout
+    while not cond() and time.monotonic() < end:
+        loop = QEventLoop()
+        QTimer.singleShot(10, loop.quit)
+        loop.exec()
+    assert cond()
+
+
+def fast(q: EhQueue, gap=30, pause=150):
+    q.gap_ms, q.burst_pause_ms, q.retry_delays_ms = gap, pause, (10, 10, 10)
+    return q
+
+
+def fix(name):
+    return (FIX / name).read_bytes()
+
+
+def test_queue_paces_requests(qapp):
+    nam = FakeNam({"e-hentai.org": (200, b"ok")})
+    q = fast(EhQueue(nam=nam))
+    done = []
+    for i in range(6):
+        q.get(f"https://e-hentai.org/{i}", lambda s, b, e: done.append((s, e)))
+    spin_until(lambda: len(done) == 6)
+    assert done == [(200, "")] * 6 and nam.max_open == 1
+    times = [t for t, *_ in nam.sent]
+    gaps = [(b - a) * 1000 for a, b in zip(times, times[1:])]
+    assert min(gaps) >= q.gap_ms - 2
+    assert gaps[3] >= q.burst_pause_ms - 2  # before the 5th
+    assert all(c == b"nw=1" for *_, c, _ in nam.sent)  # always skip content warnings, no login
+
+
+def test_queue_defaults_and_login_cookie(qapp):
+    q = EhQueue(nam=FakeNam({}))
+    assert (q.gap_ms, q.burst_pause_ms, q.retry_delays_ms) == (1000, 5000, api.RETRY_DELAYS_MS)
+    assert ehclient.EH_BURST == 4
+    q.set_login("9", "abc")
+    assert q.logged_in and q._cookie == b"ipb_member_id=9; ipb_pass_hash=abc; nw=1"
+    q.set_login("9", "a;b")  # header injection / junk is not a login
+    assert not q.logged_in and q._cookie == b"nw=1"
+
+
+def test_queue_retries_busy_then_succeeds(qapp):
+    nam = FakeNam({"e-hentai.org": [(503, b""), (429, b""), (200, b"ok")]})
+    q = fast(EhQueue(nam=nam))
+    got = []
+    q.get("https://e-hentai.org/x", lambda s, b, e: got.append((s, b, e)))
+    spin_until(lambda: got)
+    assert got == [(200, b"ok", "")] and len(nam.sent) == 3
+
+
+def test_queue_rejects_offsite_redirect(qapp):
+    nam = FakeNam({"e-hentai.org": (200, b"ok")})
+    orig = nam._reply
+
+    def redirected(req, body=None):
+        r = orig(req, body)
+        r._url = QUrl("https://evil.example/")
+        return r
+    nam._reply = redirected
+    q = fast(EhQueue(nam=nam))
+    got = []
+    q.get("https://e-hentai.org/x", lambda s, b, e: got.append(e))
+    spin_until(lambda: got)
+    assert got[0]
+
+
+def test_queue_clear_drops_pending(qapp):
+    nam = FakeNam({"e-hentai.org": (200, b"ok")})
+    q = fast(EhQueue(nam=nam))
+    got = []
+    for i in range(3):
+        q.get(f"https://e-hentai.org/{i}", lambda s, b, e: got.append(s))
+    q.clear()
+    spin_until(lambda: got)
+    loop = QEventLoop()
+    QTimer.singleShot(200, loop.quit)
+    loop.exec()
+    assert len(nam.sent) == 1 and got == [200]
+
+
+def _site(routes):
+    site = EhentaiSite()
+    site.queue._nam = FakeNam(routes)
+    fast(site.queue)
+    return site
+
+
+def test_fetch_search_then_gdata(qapp):
+    site = _site({"api.e-hentai.org": (200, fix("gdata.json")), "f_search": (200, fix("search.html"))})
+    got, bad = [], []
+    site.page_ready.connect(lambda g, posts, nxt: got.append((g, posts, nxt)))
+    site.failed.connect(lambda g, m: bad.append(m))
+    site.fetch('"x$"', None, 5, {"sites": {"e-hentai": {"member_id": "", "pass_hash": ""}}})
+    spin_until(lambda: got or bad)
+    assert not bad
+    sent = site.queue._nam.sent
+    assert "f_search=" in sent[0][1] and sent[1][1] == ehentai.EH_API and b'"gdata"' in sent[1][3]
+    gen, posts, nxt = got[0]
+    assert gen == 5 and posts and all(p.kind == "gallery" for p in posts)
+    assert nxt is not None
+    assert all(p.preview_url == "" or p.preview_url.startswith("https://") for p in posts)
+
+
+def test_fetch_gallery_and_warning(qapp):
+    from r34dl.sites.ehentai import parse_gdata
+    gallery = [g for g in parse_gdata(fix("gdata.json")) if g.album["gid"] == 4348914][0]
+    site = _site({"/g/": [(200, fix("gallery.html")), (200, fix("warning.html"))]})
+    got, bad = [], []
+    site.page_ready.connect(lambda g, posts, nxt: got.append((posts, nxt)))
+    site.failed.connect(lambda g, m: bad.append(m))
+    site.fetch_gallery(gallery, None, 1)
+    spin_until(lambda: got)
+    assert got[0][0] and all(p.kind == "page" and 1 <= p.album["page"] < 100000 for p in got[0][0])
+    site.fetch_gallery(gallery, None, 2)
+    spin_until(lambda: bad)
+    assert bad == ["This gallery is behind a content warning that the app couldn't skip."]
+
+
+def _page():
+    return Post(4348914 * 100000 + 5, "", "", "", "", [], "", 0, 0, 0, site="e-hentai", kind="page",
+                page_url="https://e-hentai.org/s/af53eed799/4348914-5", album={"gid": 4348914, "page": 5},
+                file_name="2.png")
+
+
+def _resolve(site, post, for_download):
+    out = []
+    site.resolve(post, for_download, lambda p, err: out.append(err))
+    spin_until(lambda: out)
+    return out[0]
+
+
+def test_resolve_prefers_original_only_when_logged_in_and_downloading(qapp):
+    site = _site({"/s/": (200, fix("picture_original.html"))})
+    full = "https://e-hentai.org/fullimg/4348914/4/14j5vtiaotb/2.png"
+    p = _page()
+    assert _resolve(site, p, True) is None and p.file_url != full and "hath.network" in p.file_url  # not logged in
+    site.queue.set_login("9", "abc")
+    p = _page()
+    assert _resolve(site, p, False) is None and "hath.network" in p.file_url  # viewing: the resized copy
+    p2 = _page()
+    assert _resolve(site, p2, True) is None and p2.file_url == full
+    n = len(site.queue._nam.sent)
+    assert _resolve(site, p, False) is None and len(site.queue._nam.sent) == n  # cached: no second request
+    assert p.album["shown"] == p.file_url
+
+
+def test_resolve_rejects_private_host(qapp):
+    html = b'<img id="img" src="http://192.168.0.5/x.jpg">'
+    site = _site({"/s/": (200, html)})
+    p = _page()
+    assert _resolve(site, p, False) is not None and p.file_url == ""
+
+
+def test_resolve_image_limit(qapp):
+    site = _site({"/s/": (200, fix("picture_509.html"))})
+    assert _resolve(site, _page(), False) == "IMAGE_LIMIT"
+
+
+def test_site_basics(qapp):
+    from r34dl.sites import make_sites
+    sites = make_sites(None)
+    s = sites["e-hentai"]
+    assert isinstance(s, EhentaiSite) and s.name == "e-hentai" and not s.page_jump
+    assert s.suggest_request("x") is None and s.post_page_url(_page()) == _page().page_url
+
+
+def test_open_in_browser_uses_page_url(qapp, monkeypatch):
+    from r34dl import widgets
+    opened = []
+    monkeypatch.setattr(widgets.QDesktopServices, "openUrl", lambda u: opened.append(u.toString()) or True)
+    widgets.open_in_browser(_page())
+    widgets.open_in_browser(Post(7, "", "", "", "", [], "", 0, 0, 0))
+    assert opened == [_page().page_url, api.post_page_url(7)]
+
+
+def test_scrub_masks_cookies():
+    s = api.scrub("ipb_pass_hash=abc; ipb_member_id=9 api_key=k")
+    assert "abc" not in s and "9" not in s and "=k" not in s

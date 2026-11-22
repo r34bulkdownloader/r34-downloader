@@ -18,7 +18,7 @@ RETRY_DELAYS_MS = (2000, 4000, 8000)
 
 log = logging.getLogger(__name__)
 
-_SECRET_RE = re.compile(r"(api_key|user_id)=[^&\s\"']*")
+_SECRET_RE = re.compile(r"(api_key|user_id|ipb_member_id|ipb_pass_hash)=[^&;\s\"']*")
 
 
 class ApiError(Exception):

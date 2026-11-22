@@ -53,7 +53,7 @@ def wrapped(html: str) -> QLabel:
 
 
 def open_in_browser(post: Post) -> None:
-    if not QDesktopServices.openUrl(QUrl(api.post_page_url(post.id))):
+    if not QDesktopServices.openUrl(QUrl(post.page_url or api.post_page_url(post.id))):
         log.warning("could not open a web browser for post #%s", post.id)
 
 

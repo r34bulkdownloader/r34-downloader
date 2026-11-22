@@ -95,8 +95,13 @@ class MainWindow(QMainWindow):
         self.downloader.item_done.connect(self._on_item_done)
         self.downloader.item_done.connect(self._album_progress)
         self._vault: secret.Vault | None = None  # unlocked password key (never written anywhere)
+        self._eh_login()
         if self.cfg["secret"] or not self.cfg["user_id"] or not self.cfg["api_key"]:
             QTimer.singleShot(0, self, self._startup)
+
+    def _eh_login(self):
+        sc = config.site_cfg(self.cfg, "e-hentai")
+        self.sites["e-hentai"].queue.set_login(sc["member_id"], sc["pass_hash"])
 
     def _startup(self):
         """Unlock protected credentials first; ask for credentials if there are none. Runs once."""
@@ -111,6 +116,7 @@ class MainWindow(QMainWindow):
             if r == QDialog.Accepted:
                 self.cfg.update(creds)  # in memory only
                 self._vault = vault
+                self._eh_login()
             elif r == UnlockDialog.FORGOT:
                 self.cfg.update(secret={}, user_id="", api_key="")
                 try:

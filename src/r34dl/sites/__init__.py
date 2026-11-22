@@ -44,5 +44,6 @@ class Site(QObject):
 
 
 def make_sites(parent) -> dict[str, Site]:
+    from .ehclient import EhentaiSite
     from .rule34 import Rule34Site
-    return {"rule34.xxx": Rule34Site(parent)}
+    return {"rule34.xxx": Rule34Site(parent), "e-hentai": EhentaiSite(parent)}

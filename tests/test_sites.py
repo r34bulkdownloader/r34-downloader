@@ -38,7 +38,7 @@ def test_search_tab_site_switch(qapp, tmp_path, monkeypatch):
     win.downloaded["fake"] = set()
     win.favorites["fake"] = {}
     tab = win.open_search_tab()
-    assert tab.site.name == "rule34.xxx" and tab.site_box.count() == 2
+    assert tab.site.name == "rule34.xxx" and tab.site_box.count() == 3  # rule34, e-hentai, fake
     tab.site_box.setCurrentIndex(tab.site_box.findData("fake"))
     assert tab.site.name == "fake" and win.cfg["site"] == "fake"
     assert tab.model.downloaded is win.downloaded["fake"] and tab.model.favorites is win.favorites["fake"]

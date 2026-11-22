@@ -205,9 +205,9 @@ class MainWindow(QMainWindow):
         return w if isinstance(w, SearchTab) else self.first
 
     def current_site_search(self) -> SearchTab:
-        """The search tab showing, but never Favorites (saved searches are site searches)."""
+        """The search tab showing, but never Favorites or a gallery (saved searches are site searches)."""
         w = self.current_search()
-        return self.first if isinstance(w, FavoritesTab) else w
+        return self.first if isinstance(w, (FavoritesTab, GalleryTab)) else w
 
     def set_tab_title(self, tab: QWidget, title: str):
         i = self.tabs.indexOf(tab)
@@ -309,6 +309,8 @@ class MainWindow(QMainWindow):
         elif action == "unfollow":
             self.unfollow_tag(tag, site)
         elif action in ("include", "exclude"):
+            if isinstance(target, GalleryTab):  # its tag boxes are hidden: use a search tab on that site
+                target = self.first if self.first.site.name == site else self.open_search_tab(site=site)
             target.add_tag(action, tag)
 
     def _close_tab(self, i: int):

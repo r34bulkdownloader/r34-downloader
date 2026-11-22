@@ -35,6 +35,7 @@ class SearchTab(QWidget):
     """One search: its own include/exclude boxes, results grid, selection and paging."""
 
     fetch_finished = Signal(bool)  # a page request ended (True = a page arrived, False = it failed)
+    filters = True  # blacklist and hide-downloaded leave posts out of the results
 
     def __init__(self, win: "MainWindow", include: str = "", exclude: str = "", site: str = "rule34.xxx"):
         super().__init__()
@@ -337,11 +338,11 @@ class SearchTab(QWidget):
             self._page_cursors.append(next_cursor)
         if next_cursor is None:
             self.model.exhausted = True
-        if self._blacklist:
+        if self.filters and self._blacklist:
             kept = [p for p in posts if not self._blacklist.intersection(t.lower() for t in p.tags)]
             self._blacklisted += len(posts) - len(kept)
             posts = kept
-        if self.win.cfg["hide_downloaded"]:
+        if self.filters and self.win.cfg["hide_downloaded"]:
             kept = [p for p in posts if p.id not in self.model.downloaded]
             self._hidden += len(posts) - len(kept)
             posts = kept

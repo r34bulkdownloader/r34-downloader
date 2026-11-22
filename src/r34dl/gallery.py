@@ -29,6 +29,8 @@ def crop_sprite(data: bytes, rect) -> bytes:
 class GalleryTab(SearchTab):
     """The pages of one gallery; paging follows the gallery's ?p= pages."""
 
+    filters = False  # opened on purpose: show every page (blacklisted galleries are left out of searches)
+
     def __init__(self, win: "MainWindow", gallery: Post):
         self.gallery = gallery
         super().__init__(win, "", "", gallery.site)

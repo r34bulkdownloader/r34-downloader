@@ -185,3 +185,44 @@ def test_site_switch_with_ticks_asks(win, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.Yes)
     tab.site_box.setCurrentIndex(tab.site_box.findData("e-hentai"))
     assert tab.site.name == "e-hentai" and not tab.model.checked
+
+
+def test_saved_search_skips_gallery_tab(win, monkeypatch):
+    from r34dl import config
+    monkeypatch.setattr(win.sites["e-hentai"], "fetch_gallery", lambda *a: None)
+    config.site_cfg(win.cfg, "rule34.xxx")["saved_searches"]["s"] = {"include": "cat", "exclude": "dog"}
+    gt = win.open_gallery(gallery(), False)
+    searched = []
+    monkeypatch.setattr(win.first, "search", lambda: searched.append(win.first.include_edit.toPlainText()))
+    assert win.current_site_search() is win.first
+    win.load_saved_search("s")
+    assert searched == ["cat"] and win.tabs.currentWidget() is win.first
+    assert gt.include_edit.toPlainText() == ""
+
+
+def test_include_exclude_from_gallery_viewer(win, monkeypatch):
+    monkeypatch.setattr(win.sites["e-hentai"], "fetch_gallery", lambda *a: None)
+    gt = win.open_gallery(gallery(), False)
+    win._tag_action(gt, "exclude", "male:yaoi")  # first tab is on rule34: a new e-hentai tab gets it
+    new = win.tabs.currentWidget()
+    assert new is not gt and new.site.name == "e-hentai" and new.exclude_edit.toPlainText().endswith("male:yaoi")
+    win.first.site_box.setCurrentIndex(win.first.site_box.findData("e-hentai"))
+    win._tag_action(gt, "include", "female:x")  # first tab is on e-hentai now: it gets it
+    assert win.first.include_edit.toPlainText().endswith("female:x")
+    assert gt.include_edit.toPlainText() == "" and gt.exclude_edit.toPlainText() == ""
+
+
+def test_gallery_tab_ignores_blacklist_and_hide_downloaded(win, monkeypatch):
+    from r34dl import config
+    site = win.sites["e-hentai"]
+    g = gallery()
+    config.site_cfg(win.cfg, "e-hentai")["blacklist"] = "female:long hair"
+    win.cfg["hide_downloaded"] = True
+    win.downloaded["e-hentai"].update({g.id + 1, g.id + 2})
+    monkeypatch.setattr(site, "fetch_gallery", lambda gal, p, gen: site.page_ready.emit(gen, pages(gal, 1, 10), None))
+    gt = win.open_gallery(g, False)
+    assert len(gt.model.posts) == 10 and gt._blacklisted == 0 and gt._hidden == 0
+    tab = eh_tab(win)  # a search tab still filters
+    tab._blacklist = {"female:long hair"}
+    tab._on_site_page(5, pages(g, 1, 10), None)
+    assert tab.model.posts == []

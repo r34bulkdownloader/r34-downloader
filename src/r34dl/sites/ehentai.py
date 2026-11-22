@@ -4,6 +4,7 @@ import html as htmllib
 import ipaddress
 import json
 import re
+import socket
 from urllib.parse import quote, urlparse
 
 from ..models import Post
@@ -53,7 +54,7 @@ def build_query(include: str, exclude: str, blacklist: list[str]) -> str:
 
 
 def search_url(query: str, cursor: int | None) -> str:
-    url = f"{EH}/?f_search={quote(query, safe='')}&inline_set=dm_l&nw=always"
+    url = f"{EH}/?f_search={quote(query, safe='')}&nw=always"
     return url if cursor is None else f"{url}&next={cursor}"
 
 
@@ -150,9 +151,14 @@ def safe_image_url(url: str) -> bool:
         return False
     if u.scheme not in ("http", "https") or not host or host == "localhost" or host.endswith(".localhost"):
         return False
+    # numeric IPv4 forms (2130706433, 0x7f000001, 127.1, 0177...) that QUrl normalises to dotted-quad
+    if re.fullmatch(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+))*", host, re.I):
+        try:
+            return ipaddress.ip_address(socket.inet_aton(host)).is_global
+        except OSError:
+            return False
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return True  # a host name
-    return not (ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_unspecified
-                or ip.is_multicast)
+        return True  # a host name; shortcut: one that resolves to a private IP is out of scope for this pure check
+    return ip.is_global

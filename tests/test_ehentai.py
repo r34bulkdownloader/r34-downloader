@@ -39,7 +39,7 @@ def test_build_query_leading_minus_excludes():
 
 
 def test_search_url():
-    assert search_url('a:"b$"', None) == f"{EH}/?f_search=a%3A%22b%24%22&inline_set=dm_l&nw=always"
+    assert search_url('a:"b$"', None) == f"{EH}/?f_search=a%3A%22b%24%22&nw=always"
     assert search_url("x", 4348909).endswith("&nw=always&next=4348909")
 
 
@@ -159,7 +159,9 @@ def test_parse_picture_no_img():
 def test_safe_image_url():
     assert safe_image_url("http://81.2.3.4:8080/h/x.jpg")
     for bad in ("http://127.0.0.1/x", "http://192.168.1.2/x", "http://localhost/x", "file:///etc/passwd",
-                "http://[::1]/x", "http://169.254.1.1/x"):
+                "http://[::1]/x", "http://169.254.1.1/x", "http://2130706433/", "http://0x7f000001/",
+                "http://127.1/", "http://017700000001/", "http://100.64.0.1/"):
         assert not safe_image_url(bad)
+    assert safe_image_url("https://beef.cafe/x.jpg")  # hex-looking host name is still a name
     assert safe_image_url("https://dpncxca.dxnltjxeaefj.hath.network:31209/h/a/2.webp")
     assert not safe_image_url("http://10.0.0.1/x") and not safe_image_url("http://LOCALHOST./x")

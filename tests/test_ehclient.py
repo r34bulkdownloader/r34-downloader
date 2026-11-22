@@ -296,6 +296,7 @@ def test_download_resolves_again_when_logged_in_without_a_cached_original(qapp):
 
 class FakeDownloader(QObject):
     item_done = Signal(str, str, bool)
+    limited = Signal(str, str)
 
     def __init__(self):
         super().__init__()
@@ -441,3 +442,26 @@ def test_list_all_pages_reports_failure_with_what_it_has(qapp):
     site.list_all_pages(gallery, lambda pages, err: out.append((pages, err)))
     spin_until(lambda: out)
     assert len(out[0][0]) == 20 and out[0][1] == ehclient.WARNING_MSG
+
+
+def test_cookie_only_goes_to_e_hentai_fullimg(qapp, tmp_path):
+    site, dl = _site({}), FakeDownloader()
+    site.queue.set_login("9", "abc")
+    f = ehclient.EhDownloadFeeder(site, dl)
+    p = _page()
+    p.album.update(shown="https://h.hath.network/a.jpg", original="https://attacker.example/x")  # tampered favorite
+    f.add([(p, tmp_path / "a.png")])
+    assert dl.added == [("https://attacker.example/x", tmp_path / "a.png")]  # no Cookie header
+
+
+def test_feeder_pauses_when_the_downloader_reports_the_limit(qapp, tmp_path):
+    site, dl = FakeSite(), FakeDownloader()
+    f = ehclient.EhDownloadFeeder(site, dl)
+    pages = _pages(2)
+    paused = []
+    f.paused.connect(paused.append)
+    f.add([(p, tmp_path / f"{i}.jpg") for i, p in enumerate(pages)])
+    dl.limited.emit(dl.added[0][0], str(tmp_path / "0.jpg"))
+    assert paused == ["IMAGE_LIMIT"] and len(site.calls) == 1 and f.active
+    f.resume()
+    assert site.calls == [pages[0], pages[0]] and len(dl.added) == 2  # the same picture again

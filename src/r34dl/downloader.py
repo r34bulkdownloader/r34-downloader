@@ -8,6 +8,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 
 from .api import request, scrub
 from .naming import unique_path
+from .sites.ehentai import safe_image_url
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class _Item:
         self.url = url  # as queued: item_done reports this one
         self.fetch_url = url  # where a redirect sent us
         self.headers = headers or {}
+        self.original = bool(headers)  # an e-hentai original: its answer may be a limit picture or error page
         self.target = target
         self.retries = 0
         self.reply: QNetworkReply | None = None
@@ -42,6 +44,9 @@ class Downloader(QObject):
     # One per queued item: url, target path, ok. ok = the file is now on disk (downloaded, or an identical file
     # was already there); not ok = failed for good after retries. Albums track by target, history by url.
     item_done = Signal(str, str, bool)
+    # An original came back as e-hentai's image-limit picture or an error page: dropped (no file, no item_done,
+    # not in "Retry failed") so the feeder can keep the job and pause.
+    limited = Signal(str, str)  # url, target
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -153,6 +158,11 @@ class Downloader(QObject):
         if it.headers and redirect is not None and not it.error:
             it.fetch_url, it.headers = it.reply.url().resolved(redirect).toString(), {}
             self._close(it, remove=True)
+            if it.fetch_url.endswith("/509.gif"):
+                return self._limited(it)
+            if not safe_image_url(it.fetch_url):
+                it.error, it.retries = "redirected to a refused address", len(RETRY_DELAYS)
+                return self._error(it)
             self._start(it)
             return
         err = it.error or (it.reply.errorString() if it.reply.error() != QNetworkReply.NoError else "")
@@ -164,6 +174,10 @@ class Downloader(QObject):
             self._close(it, remove=True)
             self._error(it)
             return
+        ctype = str(it.reply.header(QNetworkRequest.ContentTypeHeader) or "").lower()
+        if it.original and ("text/html" in ctype or it.reply.url().path().endswith("/509.gif")):
+            self._close(it, remove=True)
+            return self._limited(it)
         self._close(it, remove=False)
         try:
             final = unique_path(it.target, it.written)
@@ -190,6 +204,13 @@ class Downloader(QObject):
         log.warning("download failed: %s: %s", scrub(it.url), scrub(it.error))
         self._finish(it, failed=True)  # first, so a listener's forget_failed() sees this item in the failed list
         self.item_done.emit(it.url, str(it.target), False)
+
+    def _limited(self, it: _Item):
+        log.warning("e-hentai sent no picture for %s (image limit or an error page)", scrub(it.url))
+        self._running.remove(it)
+        self._total -= 1
+        self.limited.emit(it.url, str(it.target))
+        self._pump()
 
     def _retry(self, it: _Item, gen: int):
         if gen == self._gen:

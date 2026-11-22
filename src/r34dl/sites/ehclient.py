@@ -211,10 +211,11 @@ class EhentaiSite(Site):
             self._pick(post, for_download, cb)
         self.queue.get(post.page_url, on_page, low=for_download)
 
-    def list_all_pages(self, gallery: Post, cb) -> None:
+    def list_all_pages(self, gallery: Post, cb):
         """Every page post of the gallery, walking fetch_gallery until there is no next p; then
-        cb(pages, error or None). On an error, pages holds what was listed before it."""
-        gen, got = next(_list_gens), []
+        cb(pages, error or None). On an error, pages holds what was listed before it.
+        Returns stop(): no further pages are asked for and cb is never called."""
+        gen, got, over = next(_list_gens), [], []
 
         def ready(g, pages, nxt):
             if g != gen:
@@ -228,13 +229,19 @@ class EhentaiSite(Site):
             if g == gen:
                 done(msg)
 
+        def stop():
+            if not over:
+                over.append(1)
+                self.page_ready.disconnect(ready)
+                self.failed.disconnect(bad)
+
         def done(err):
-            self.page_ready.disconnect(ready)
-            self.failed.disconnect(bad)
+            stop()
             cb(got, err)
         self.page_ready.connect(ready)
         self.failed.connect(bad)
         self.fetch_gallery(gallery, None, gen)
+        return stop
 
     def _pick(self, post: Post, for_download: bool, cb) -> None:
         original, shown = post.album.get("original"), post.album.get("shown")
@@ -257,9 +264,11 @@ class EhDownloadFeeder(QObject):
         self.site, self.downloader = site, downloader
         self._jobs: deque = deque()  # (post, target path)
         self._busy: str | bool = False  # True: resolving; a target text: downloading it
+        self._current = None  # the job being downloaded, kept for an image-limit answer
         self._paused = False
         self._gen = 0
         downloader.item_done.connect(self._on_item_done)
+        downloader.limited.connect(self._on_limited)
 
     @property
     def active(self) -> bool:
@@ -305,10 +314,18 @@ class EhDownloadFeeder(QObject):
             self.failed.emit(post.page_url, str(target))
             return self._next()
         q = self.site.queue
-        original = q.logged_in and post.file_url == post.album.get("original")
-        self._busy = str(target)
+        # the album may come from a favorites file: the login cookie only ever goes to e-hentai's fullimg
+        original = (q.logged_in and post.file_url == post.album.get("original")
+                    and post.file_url.startswith(eh.EH + "/fullimg"))
+        self._busy, self._current = str(target), (post, target)
         self.downloader.add([(post.file_url, target, {b"Cookie": q._cookie})] if original else
                             [(post.file_url, target)])
+
+    def _on_limited(self, url: str, target: str) -> None:
+        if self._busy and target == self._busy:
+            self._jobs.appendleft(self._current)
+            self._busy, self._paused = False, True
+            self.paused.emit("IMAGE_LIMIT")
 
     def _on_item_done(self, url: str, target: str, ok: bool) -> None:
         if self._busy and target == self._busy:

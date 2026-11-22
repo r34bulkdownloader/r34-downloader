@@ -286,3 +286,26 @@ def test_image_limit_pauses_and_resume_button_continues(win, monkeypatch, tmp_pa
     assert not added and not win.resume_btn.isHidden() and "image limit" in win.statusBar().currentMessage()
     win.resume_btn.click()
     assert len(added) == 1 and win.resume_btn.isHidden()
+
+
+def test_cancel_while_listing_a_gallery_queues_nothing(win, monkeypatch, tmp_path):
+    from r34dl import ui
+    win.cfg["save_dir"] = str(tmp_path)
+    site = win.sites["e-hentai"]
+    waiting, stopped = [], []
+
+    def list_all_pages(gal, cb):
+        waiting.append(cb)
+        return lambda: stopped.append(1)
+    monkeypatch.setattr(site, "list_all_pages", list_all_pages)
+    monkeypatch.setattr(site, "resolve", lambda post, d, cb: cb(post, None))
+    added = []
+    monkeypatch.setattr(win.downloader, "add", lambda items: added.extend(items))
+    monkeypatch.setattr(ui.QInputDialog, "getText", staticmethod(lambda *a, **k: ("gal", True)))
+    win.download_album([gallery(pages=3)], "", zipped=True)
+    parts = win._zip_jobs[0].parts
+    win.cancel_btn.click()
+    assert stopped == [1] and not parts.exists() and not win._zip_jobs
+    waiting[0](pages(gallery(), 1, 3), None)  # a listing that answers anyway
+    assert not added and not win.feeder.active and not parts.exists()
+    assert not list(tmp_path.glob(".r34-zip-parts-*")) and not list(tmp_path.glob("*.zip"))

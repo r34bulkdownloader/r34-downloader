@@ -32,11 +32,19 @@ def server():
                 st.max_open = max(st.max_open, st.open)
                 st.cookies = getattr(st, "cookies", []) + [(self.path, self.headers.get("Cookie"))]
             try:
-                if self.path == "/redir":
+                redirects = {"/redir": "/ok", "/to509": "/509.gif", "/toloop": "http://127.0.0.1:9/x.jpg",
+                             "/tolimit": "/limit"}
+                if self.path in redirects:
                     self.send_response(302)
-                    self.send_header("Location", "/ok")
+                    self.send_header("Location", redirects[self.path])
                     self.send_header("Content-Length", "0")
                     self.end_headers()
+                elif self.path in ("/html", "/509.gif", "/limit"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html" if self.path == "/html" else "image/gif")
+                    self.send_header("Content-Length", "5")
+                    self.end_headers()
+                    self.wfile.write(b"x" * 5)
                 elif self.path == "/ok" or (self.path == "/500" and not st.fail_500):
                     self.send_response(200)
                     self.send_header("Content-Length", "100")
@@ -189,7 +197,12 @@ def test_downloader_extra_headers(qapp, server, tmp_path):
     assert sorted(server.cookies, key=str) == [("/ok", "nw=1"), ("/ok", None)]
 
 
-def test_extra_headers_are_not_sent_on_after_a_redirect(qapp, server, tmp_path):
+@pytest.fixture
+def local_ok(monkeypatch):
+    monkeypatch.setattr(downloader, "safe_image_url", lambda url: True)  # the test server is on 127.0.0.1
+
+
+def test_extra_headers_are_not_sent_on_after_a_redirect(qapp, server, tmp_path, local_ok):
     d = Downloader()
     saved = []
     d.item_done.connect(lambda url, target, ok: saved.append((url, ok)))
@@ -197,3 +210,35 @@ def test_extra_headers_are_not_sent_on_after_a_redirect(qapp, server, tmp_path):
     run_until_finished(d)
     assert server.cookies == [("/redir", "secret=1"), ("/ok", None)]
     assert (tmp_path / "a.jpg").stat().st_size == 100 and saved == [(server.url + "/redir", True)]
+
+
+def test_redirect_of_an_original_to_a_private_host_is_refused(qapp, server, tmp_path):
+    d = Downloader()
+    done = []
+    d.item_done.connect(lambda url, target, ok: done.append(ok))
+    d.add([(server.url + "/toloop", tmp_path / "a.jpg", {b"Cookie": b"secret=1"})])
+    run_until_finished(d)
+    assert done == [False] and not list(tmp_path.iterdir())
+    assert [p for p, _ in server.cookies] == ["/toloop"]  # the refused address was never asked
+
+
+@pytest.mark.parametrize("path", ["/html", "/to509"])
+def test_original_answered_with_an_error_page_or_509_is_limited(qapp, server, tmp_path, local_ok, path):
+    d = Downloader()
+    done, limited = [], []
+    d.item_done.connect(lambda *a: done.append(a))
+    d.limited.connect(lambda url, target: limited.append((url, target)))
+    d.add([(server.url + path, tmp_path / "a.jpg", {b"Cookie": b"c=1"}), (server.url + "/html", tmp_path / "b.htm")])
+    run_until_finished(d)
+    assert limited == [(server.url + path, str(tmp_path / "a.jpg"))] and len(done) == 1  # b.htm: not an original
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["b.htm"] and d._failed == []
+    assert "/509.gif" not in [p for p, _ in server.cookies]  # the 509 picture isn't even fetched
+
+
+def test_original_redirected_on_to_a_509_picture_is_limited(qapp, server, tmp_path, local_ok):
+    d = Downloader()
+    limited = []
+    d.limited.connect(lambda url, target: limited.append(url))
+    d.add([(server.url + "/tolimit", tmp_path / "a.jpg", {b"Cookie": b"c=1"})])
+    run_until_finished(d)
+    assert limited == [] and (tmp_path / "a.jpg").exists()  # a gif that isn't /509.gif is a picture

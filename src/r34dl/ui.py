@@ -89,6 +89,8 @@ class MainWindow(QMainWindow):
         self._url_ids: dict[str, tuple[str, int]] = {}  # queued file url -> (site, post id), for the history
         self._target_ids: dict[str, tuple[str, int]] = {}  # same for e-hentai pages (url known only later)
         self._zip_jobs: list[_ZipJob] = []
+        self._cancels = 0  # bumped by Cancel: gallery listings started before it are dropped
+        self._listings: list = []  # stop() of each gallery listing in progress (for Cancel)
         self._eh_failed = 0  # e-hentai pictures that couldn't be resolved (the downloader never saw them)
         self._last_progress = (0, 0, 0, 0)
         self._zip_threads: list[threading.Thread] = []  # ZIPs being packed in the background
@@ -544,7 +546,7 @@ class MainWindow(QMainWindow):
             return []
         if any(p.kind == "gallery" for p in posts):
             self._expand(posts, lambda pages: self._queue_posts(pages, search, album, queued))
-            return []
+            return []  # Cancel while listing: queued is never called (cancel_downloads drops the ZIP job itself)
         return self._queue_posts(posts, search, album, queued)
 
     @staticmethod
@@ -563,7 +565,7 @@ class MainWindow(QMainWindow):
 
     def _expand(self, posts: list[Post], cb):
         """Galleries become their pages (listed one gallery at a time, in order); then cb(posts)."""
-        todo, out = list(posts), []
+        todo, out, cancels = list(posts), [], self._cancels
         site = self.sites["e-hentai"]
         sb = self.statusBar()
 
@@ -577,13 +579,23 @@ class MainWindow(QMainWindow):
             g = todo.pop(0)
             sb.showMessage(f"Listing pages of {g.label}…")
 
+            running = []  # this listing's stop() while it runs; "done" once it answered
+
             def listed(pages, err):
+                if running and running[-1] in self._listings:  # Cancel already cleared the list
+                    self._listings.remove(running[-1])
+                running.append("done")
+                if cancels != self._cancels:
+                    return  # Cancel was pressed meanwhile: queue nothing
                 out.extend(pages)
                 if err:
                     log.warning("could not list the pages of gallery %s: %s", g.album.get("gid"), err)
                     sb.showMessage(f"Could not list every page of {g.label}: {err}", 15000)
                 step()
-            site.list_all_pages(g, listed)
+            stop = site.list_all_pages(g, listed)
+            if not running:  # not answered right away
+                running.append(stop)
+                self._listings.append(stop)
         step()
 
     def _queue_posts(self, posts: list[Post], search: str, album: Path | None, queued) -> list[Path]:
@@ -711,6 +723,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved {target.name}: {files} files{failed}", 15000)
 
     def cancel_downloads(self):
+        self._cancels += 1
+        for stop in self._listings:
+            stop()
+        if self._listings and self.statusBar().currentMessage().startswith("Listing pages of"):
+            self.statusBar().clearMessage()
+        self._listings.clear()
         self.feeder.cancel()
         self.resume_btn.hide()
         self._eh_failed = 0

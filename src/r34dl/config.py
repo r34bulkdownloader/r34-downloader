@@ -53,9 +53,9 @@ def site_cfg(cfg: dict, site: str) -> dict:
         return cfg
     if not isinstance(cfg.get("sites"), dict):
         cfg["sites"] = {}
-    saved = cfg["sites"].get(site)
-    saved = saved if isinstance(saved, dict) else {}
-    out = cfg["sites"][site] = {**saved}
+    if not isinstance(cfg["sites"].get(site), dict):
+        cfg["sites"][site] = {}
+    out = cfg["sites"][site]  # filled in place so earlier references stay live
     for k, v in SITE_DEFAULTS[site].items():
         if not isinstance(out.get(k), type(v)):
             out[k] = copy.deepcopy(v)

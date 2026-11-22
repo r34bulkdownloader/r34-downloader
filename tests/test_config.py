@@ -1,3 +1,4 @@
+import copy
 import json
 import stat
 
@@ -238,3 +239,11 @@ def test_secret_blanks_eh_cookies(tmp_path):
     disk = json.loads(config.path().read_text())
     assert disk["sites"]["e-hentai"]["member_id"] == "" and disk["sites"]["e-hentai"]["pass_hash"] == ""
     assert config.site_cfg(cfg, "e-hentai")["member_id"] == "42"  # the in-memory copy is untouched
+
+
+def test_site_cfg_returns_same_live_dict():
+    cfg = copy.deepcopy(config.DEFAULTS)
+    eh = config.site_cfg(cfg, "e-hentai")
+    assert eh is config.site_cfg(cfg, "e-hentai")
+    eh["member_id"] = "9"
+    assert config.site_cfg(cfg, "e-hentai")["member_id"] == "9" and cfg["sites"]["e-hentai"] is eh

@@ -1,0 +1,37 @@
+[
+  {
+    "id": "101",
+    "hash": "abc123",
+    "file_url": "https://api-cdn.rule34.xxx/images/1/abc123.jpg",
+    "preview_url": "https://api-cdn.rule34.xxx/thumbnails/1/thumbnail_abc123.jpg",
+    "sample_url": "https://api-cdn.rule34.xxx/samples/1/sample_abc123.jpg",
+    "tags": "tag_a tag_b",
+    "rating": "explicit",
+    "score": "12",
+    "width": 800,
+    "height": "600",
+    "tag_info": [
+      {
+        "count": 59460,
+        "type": "character",
+        "tag": "tag_a"
+      },
+      {
+        "count": 4010685,
+        "type": "tag",
+        "tag": "tag_b"
+      }
+    ]
+  },
+  {
+    "id": 102,
+    "hash": "def456",
+    "file_url": "https://api-cdn.rule34.xxx/images/2/def456.webm",
+    "preview_url": "https://api-cdn.rule34.xxx/thumbnails/2/thumbnail_def456.jpg",
+    "tags": "tag_b video",
+    "rating": "safe",
+    "score": 3,
+    "width": 1280,
+    "height": 720
+  }
+]

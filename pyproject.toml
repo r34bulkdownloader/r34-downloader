@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "r34dl"
+version = "1.0.0"
+description = "Search, preview and bulk-download posts from rule34.xxx"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PySide6>=6.6", "cryptography>=42"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+r34dl = "r34dl.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

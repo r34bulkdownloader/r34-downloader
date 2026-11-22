@@ -1,0 +1,490 @@
+"""Search tabs and the Favorites tab."""
+import itertools
+from typing import TYPE_CHECKING
+import logging
+import re
+from collections import deque
+
+from PySide6.QtCore import (
+    QPoint, Qt, QTimer, Signal,
+)
+from PySide6.QtGui import (
+    QKeySequence, QShortcut,
+)
+from PySide6.QtNetwork import QNetworkReply
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QMenu, QToolButton, QMessageBox, QPushButton, QSizePolicy,
+    QSpinBox, QVBoxLayout, QWidget,
+)
+
+from . import api
+from .models import Post
+from .grid import ResultsModel, ResultsView
+from .widgets import BLACKLIST_SERVER_MAX, CELL_PAD, MAX_THUMBS, PAGE_SIZE, TagEdit, hint_label, open_in_browser, snap_thumb, wrapped
+
+if TYPE_CHECKING:  # type hints only: ui imports this module
+    from .ui import MainWindow
+
+log = logging.getLogger(__name__)
+
+_generations = itertools.count(1)  # search generations are unique across all search tabs
+
+
+class SearchTab(QWidget):
+    """One search: its own include/exclude boxes, results grid, selection and paging."""
+
+    fetch_finished = Signal(bool)  # a page request ended (True = a page arrived, False = it failed)
+
+    def __init__(self, win: "MainWindow", include: str = "", exclude: str = ""):
+        super().__init__()
+        self.win = win
+        self.model = ResultsModel(self)
+        self.model.downloaded = win.downloaded  # shared set: one history for every tab
+        self.model.favorites = win.favorites  # shared dict: one favorites list for every tab
+        self.model.thumb_size = snap_thumb(win.size_slider.value())
+        self._tags = ""
+        self._include = ""
+        self._next_pid = 0
+        self._inflight = False
+        self._failed_shown: tuple[int, int] | None = None
+        self._hidden = 0  # posts left out of this search because they were already downloaded
+        self._blacklisted = 0  # posts left out because of the blacklist
+        self._blacklist: set[str] = set()
+        self._paged = False  # page-at-a-time mode (Settings: infinite scroll off), fixed per search
+        self._page = 0  # current site page in page mode
+        self._thumb_queue: deque[Post] = deque()
+        self._thumb_active = 0
+        self._thumb_replies: set[QNetworkReply] = set()
+        self._closed = False
+        self._build_ui(include, exclude)
+        win.api.page_ready.connect(self._on_page_ready)
+        win.api.failed.connect(self._on_failed)
+        self.view.verticalScrollBar().valueChanged.connect(self._maybe_load_more)
+        self.model.dataChanged.connect(lambda *_: self._update_counts())
+        self.model.modelReset.connect(self._update_counts)
+        self.model.rowsInserted.connect(lambda *_: self._update_counts())
+        self._update_counts()
+
+    def _build_ui(self, include: str, exclude: str):
+        win = self.win
+        row = QHBoxLayout(self)
+        side = QWidget()
+        side.setFixedWidth(260)
+        sv = QVBoxLayout(side)
+        sv.addWidget(wrapped("<b>Include tags</b> — posts must have all of these"))
+        self.include_edit = TagEdit(win.nam)
+        self.include_edit.setPlainText(include)
+        self.include_edit.setPlaceholderText("for example:\nlong_hair\nblue_eyes\nrating:questionable")
+        sv.addWidget(self.include_edit, 2)
+        sv.addWidget(wrapped("<b>Exclude tags</b> — hide posts with any of these"))
+        self.exclude_edit = TagEdit(win.nam)
+        self.exclude_edit.setPlainText(exclude)
+        self.exclude_edit.setPlaceholderText("for example:\nai_generated\n3d")
+        sv.addWidget(self.exclude_edit, 1)
+        self.tags_hint = hint_label(
+            "One tag per line (spaces or commas work too). Inside a tag, use _ instead of a space: "
+            "<b>long_hair</b>. Extras: <b>rating:questionable</b> or <b>rating:explicit</b>, <b>sort:score</b>, <b>score:&gt;=50</b>. "
+            "The first tab's exclude list is remembered.")
+        sv.addWidget(self.tags_hint)
+        self.search_btn = QPushButton("Search")
+        self.search_btn.setToolTip("Ctrl+Enter in either box also searches")
+        self.search_btn.clicked.connect(self.search)
+        sv.addWidget(self.search_btn)
+        for ed in (self.include_edit, self.exclude_edit):
+            QShortcut(QKeySequence("Ctrl+Return"), ed, activated=self.search, context=Qt.WidgetShortcut)
+            QShortcut(QKeySequence("Ctrl+Enter"), ed, activated=self.search, context=Qt.WidgetShortcut)
+        self.save_label = QLabel()
+        self.save_label.setWordWrap(True)
+        pick = QPushButton("Choose folder…")
+        pick.clicked.connect(win._pick_folder)
+        sv.addWidget(self.save_label)
+        sv.addWidget(pick)
+        self.template_label = QLabel()
+        self.template_label.setWordWrap(True)
+        sv.addWidget(self.template_label)
+        self.dl_btn = QToolButton()
+        self.dl_btn.setText("Download 0")
+        self.dl_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.dl_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.dl_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.dl_btn.setToolTip("Download the ticked posts · arrow: download them as one folder or ZIP (albums)")
+        dl_menu = QMenu(self.dl_btn)
+        dl_menu.addAction("Download", self.download_selected)
+        dl_menu.addAction("Download as folder…", lambda: self.win.download_album(
+            self.model.selected_posts(), self._include, zipped=False))
+        dl_menu.addAction("Download as ZIP…", lambda: self.win.download_album(
+            self.model.selected_posts(), self._include, zipped=True))
+        self.dl_btn.setMenu(dl_menu)
+        self.dl_btn.clicked.connect(self.download_selected)
+        sv.addWidget(self.dl_btn)
+        row.addWidget(side)
+
+        right = QVBoxLayout()
+        bar = QHBoxLayout()
+        self.count_label = QLabel()
+        bar.addWidget(self.count_label, 1)
+        for text, mode in (("All", "all"), ("None", "none"), ("Invert", "invert")):
+            b = QPushButton(text)
+            b.clicked.connect(lambda _=False, m=mode: self.model.set_all(m))
+            bar.addWidget(b)
+        self.together_btn = QPushButton("Open together")
+        self.together_btn.setToolTip("Open the ticked posts side by side in one tab")
+        self.together_btn.clicked.connect(lambda: self.win.open_together(self.model.selected_posts()))
+        bar.addWidget(self.together_btn)
+        self.slideshow_btn = QPushButton("▶ Slideshow")
+        self.slideshow_btn.setToolTip("Show these posts full screen, one after another (or only the ticked ones)")
+        self.slideshow_btn.clicked.connect(lambda: self.win.start_slideshow(self))
+        bar.addWidget(self.slideshow_btn)
+        right.addLayout(bar)
+        right.addWidget(hint_label(
+            "Click a picture to open it in a tab · Ctrl+click or middle-click opens it in the background · "
+            "tick the box in the corner to select it for Download · Shift+click selects a range · "
+            "a green ↓ means you downloaded it before · ♥ marks a favorite."))
+        self.view = ResultsView()
+        self.view.setModel(self.model)
+        self.view.preview.nam = win.nam
+        self.view.preview.enabled = lambda: self.win.cfg["hover_preview"]
+        self.view.set_thumb_size(self.model.thumb_size)
+        self.view.post_clicked.connect(self._on_post_clicked)
+        self.view.context_requested.connect(self._post_menu)
+        self.view.zoom_requested.connect(win.zoom_thumbs)
+        right.addWidget(self.view, 1)
+        self.page_bar = QWidget()
+        pb = QHBoxLayout(self.page_bar)
+        pb.setContentsMargins(0, 0, 0, 0)
+        self.prev_page_btn = QPushButton("◀ Previous page")
+        self.next_page_btn = QPushButton("Next page ▶")
+        self.page_label = QLabel()
+        self.page_jump = QSpinBox()
+        self.page_jump.setRange(1, 200000)
+        self.page_jump.setPrefix("Page ")
+        go = QPushButton("Go")
+        self.prev_page_btn.clicked.connect(lambda: self.go_page(self._page - 1))
+        self.next_page_btn.clicked.connect(lambda: self.go_page(self._page + 1))
+        go.clicked.connect(lambda: self.go_page(self.page_jump.value() - 1))
+        pb.addWidget(self.prev_page_btn)
+        pb.addStretch(1)
+        pb.addWidget(self.page_label)
+        pb.addStretch(1)
+        pb.addWidget(self.page_jump)
+        pb.addWidget(go)
+        pb.addWidget(self.next_page_btn)
+        self.page_bar.hide()
+        right.addWidget(self.page_bar)
+        row.addLayout(right, 1)
+        self.refresh_settings_labels()
+
+    def title(self) -> str:
+        text = " ".join(self._include.split())
+        return (text[:28] + "…" if len(text) > 29 else text) or "Search"
+
+    def refresh_settings_labels(self):
+        self.save_label.setText(f"Save to: {api.home_short(self.win.cfg['save_dir'])}")
+        self.template_label.setText(f"Name: {self.win.cfg['template']}")
+
+    def release(self):
+        """Tab is closing: ignore further search results and stop its thumbnail downloads and preview."""
+        self._closed = True
+        self.view.preview.stop()
+        for sig, slot in ((self.win.api.page_ready, self._on_page_ready), (self.win.api.failed, self._on_failed)):
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self._thumb_queue.clear()
+        for reply in list(self._thumb_replies):
+            reply.finished.disconnect()
+            reply.abort()
+            reply.deleteLater()
+        self._thumb_replies.clear()
+
+    # ---- search / paging
+    def search(self):
+        if self.model.checked:
+            r = QMessageBox.question(self, "New search", "Discard the current selection and search again?")
+            if r != QMessageBox.Yes:
+                return
+        self.win.search_started(self)
+        self.model.generation = next(_generations)
+        self.model.reset()
+        self._thumb_queue.clear()
+        self._include = self.include_edit.toPlainText()
+        included = {t.lower() for t in api.split_tags(self._include)}
+        excluded = {t.lower().lstrip("-") for t in api.split_tags(self.exclude_edit.toPlainText())}
+        active = [t.lower().lstrip("-") for t in api.split_tags(self.win.cfg["blacklist"])]
+        active = [t for t in dict.fromkeys(active) if t and t not in included]
+        self._blacklist = set(active)
+        server_side = " ".join([t for t in active if t not in excluded][:BLACKLIST_SERVER_MAX])
+        self._tags = api.build_tags(self._include, self.exclude_edit.toPlainText() + " " + server_side)
+        self._next_pid = 0
+        self._inflight = False
+        self._failed_shown = None
+        self._hidden = 0
+        self._blacklisted = 0
+        self._paged = not self.win.cfg["infinite_scroll"]
+        self._page = 0
+        self.page_bar.setVisible(self._paged)
+        self.win.set_tab_title(self, self.title())
+        self._fetch_next()
+
+    def _fetch_next(self):
+        if self._inflight or self.model.exhausted:
+            return
+        self._inflight = True
+        cfg = self.win.cfg
+        pid = self._page if self._paged else self._next_pid
+        self.win.api.fetch(self._tags, pid, self.model.generation, cfg["user_id"], cfg["api_key"])
+        self._update_counts()
+
+    def go_page(self, page: int):
+        """Page mode: show site page `page` (0-based) instead of the current one; ticks are kept."""
+        if not self._paged or self._inflight or page < 0 or self.model.generation == 0:
+            return
+        self._page = page
+        self._hidden = self._blacklisted = 0
+        self._thumb_queue.clear()
+        self.model.reset(keep_selection=True)
+        self.view.scrollToTop()
+        self._fetch_next()
+
+    def _on_page_ready(self, gen: int, posts: list, raw: int | None = None):
+        if gen != self.model.generation or self._closed:
+            return
+        self._inflight = False
+        page = self._page if self._paged else self._next_pid
+        if not self._paged:
+            self._next_pid += 1
+        if (len(posts) if raw is None else raw) < PAGE_SIZE:
+            self.model.exhausted = True
+        if self._blacklist:
+            kept = [p for p in posts if not self._blacklist.intersection(t.lower() for t in p.tags)]
+            self._blacklisted += len(posts) - len(kept)
+            posts = kept
+        if self.win.cfg["hide_downloaded"]:
+            kept = [p for p in posts if p.id not in self.model.downloaded]
+            self._hidden += len(posts) - len(kept)
+            posts = kept
+        new = self.model.append(posts, page)
+        self._thumb_queue.extend(new)
+        self._pump_thumbs()
+        self._update_counts()
+        if not self._paged and not self.model.posts and not self.model.exhausted:
+            self._fetch_next()  # whole page was hidden; scrolling can't trigger more with an empty grid
+        QTimer.singleShot(0, self, self._maybe_load_more)  # tied to the tab: dropped if it's closed first
+        self.fetch_finished.emit(True)
+
+    def _on_failed(self, gen: int, msg: str):
+        if gen != self.model.generation or self._closed:
+            return
+        self._inflight = False
+        self._update_counts()  # re-enable page buttons, drop "loading…"
+        self.fetch_finished.emit(False)
+        msg = api.scrub(msg)
+        key = (gen, self._page if self._paged else self._next_pid)
+        if self._failed_shown == key:
+            return  # already told the user about this page; the next scroll retries silently
+        self._failed_shown = key
+        if self.win.tabs.currentWidget() is not self:  # don't pop up over the tab the user is looking at
+            self.win.set_tab_title(self, "⚠ " + self.title())
+            self.win.tabs.setTabToolTip(self.win.tabs.indexOf(self), f"Search failed: {msg}")
+            return
+        if "Settings" in msg:
+            r = QMessageBox.question(self, "Search failed", f"{msg}\n\nOpen Settings?")
+            if r == QMessageBox.Yes:
+                self.win.open_settings()
+        else:
+            QMessageBox.warning(self, "Search failed", msg)
+
+    def can_load_more(self) -> bool:
+        return not self.model.exhausted and self.model.generation > 0
+
+    def load_more(self):
+        """Fetch the next page (Next ▶ in a post tab at the end of loaded results)."""
+        if self._paged:
+            self.go_page(self._page + 1)
+        else:
+            self._fetch_next()
+
+    def _maybe_load_more(self, *_):
+        if self._closed:
+            return
+        self._update_counts()  # the "Page X of Y" indicator follows the scroll position
+        if self._paged or self._inflight or self.model.exhausted or not self.model.posts:
+            return
+        sb = self.view.verticalScrollBar()
+        if sb.maximum() - sb.value() <= 1.5 * self.view.viewport().height():
+            self._fetch_next()
+
+    # ---- thumbnails
+    def _pump_thumbs(self):
+        while self._thumb_active < MAX_THUMBS and self._thumb_queue:
+            post = self._thumb_queue.popleft()
+            if not post.preview_url:
+                continue
+            gen = self.model.generation
+            req = api.request(post.preview_url)
+            reply = self.win.nam.get(req)
+            self._thumb_active += 1
+            self._thumb_replies.add(reply)
+            reply.finished.connect(lambda r=reply, p=post, g=gen: self._thumb_done(r, p, g))
+
+    def _thumb_done(self, reply: QNetworkReply, post: Post, gen: int):
+        self._thumb_active -= 1
+        self._thumb_replies.discard(reply)
+        data = bytes(reply.readAll()) if reply.error() == QNetworkReply.NoError else b""
+        if not data:
+            log.warning("thumbnail failed for post #%s: %s", post.id, reply.errorString())
+        reply.deleteLater()
+        if gen == self.model.generation and data:
+            self.model.thumb_ready(post.id, data)
+        self._pump_thumbs()
+
+    # ---- interaction
+    def set_thumb_size(self, side: int):
+        self.view.set_thumb_size(side)
+
+    def _post_menu(self, row: int, pos):
+        m = self._make_post_menu(self.model.posts[row])
+        m.exec(pos)
+        m.deleteLater()
+
+    def _make_post_menu(self, post: Post) -> QMenu:
+        m = QMenu(self)
+        m.addAction("Open in tab", lambda: self.win.open_viewer(post, False, self))
+        m.addAction("Open in background tab", lambda: self.win.open_viewer(post, True, self))
+        m.addAction("Open in browser", lambda: open_in_browser(post))
+        m.addSeparator()
+        m.addAction("Download", lambda: self.win.download_posts([post], self._include))
+        m.addAction("Remove from favorites" if post.id in self.win.favorites else "Add to favorites",
+                    lambda: self.win.toggle_favorite(post))
+        return m
+
+    def _on_post_clicked(self, row: int, background: bool):
+        self.win.open_viewer(self.model.posts[row], background, self)
+
+    def _current_page(self) -> int:
+        """Site page (1-based) of the first post visible in the grid."""
+        idx = self.view.indexAt(QPoint(CELL_PAD, CELL_PAD))
+        post = self.model.posts[idx.row()] if idx.isValid() else (self.model.posts[0] if self.model.posts else None)
+        return self.model.page_of.get(post.id, 0) + 1 if post else 1
+
+    def _update_counts(self):
+        n = len(self.model.checked)
+        hidden = f" · {self._hidden} already downloaded (hidden)" if self._hidden else ""
+        hidden += f" · {self._blacklisted} hidden by blacklist" if self._blacklisted else ""
+        loading = " · loading…" if self._inflight else ""
+        if self._paged:
+            page = f"Page {self._page + 1}"
+            self.count_label.setText(f"{page} · {len(self.model.posts)} posts · {n} selected{hidden}{loading}")
+            self.page_label.setText(page)
+            self.prev_page_btn.setEnabled(self._page > 0 and not self._inflight)
+            self.next_page_btn.setEnabled(not self.model.exhausted and not self._inflight)
+        else:
+            pages = f" · Page {self._current_page()} of {self._next_pid} loaded" if self._next_pid else ""
+            self.count_label.setText(f"{len(self.model.posts)} loaded{pages} · {n} selected{hidden}{loading}")
+        self.dl_btn.setText(f"Download {n}")
+        self.together_btn.setEnabled(n >= 2)
+        self.slideshow_btn.setEnabled(bool(self.model.posts))
+
+    def download_selected(self):
+        self.win.download_posts(self.model.selected_posts(), self._include)
+
+    def add_tag(self, box: str, tag: str):
+        """Append a tag to this tab's include or exclude box (one per line, no duplicates)."""
+        edit = self.include_edit if box == "include" else self.exclude_edit
+        tags = re.split(r"[\s,]+", edit.toPlainText())
+        if tag not in tags:
+            text = edit.toPlainText().rstrip()
+            edit.setPlainText((text + "\n" if text else "") + tag)
+
+
+class FavoritesTab(SearchTab):
+    """Your favorites as a grid (same ticking, Download, Download as…, Open together). The tag boxes filter
+    locally — no requests to the site. The blacklist applies here too."""
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win, "", "")
+        self.include_edit.setPlaceholderText("filter by tag, e.g.\nlong_hair\nrating:explicit")
+        self.exclude_edit.setPlaceholderText("hide favorites with\nany of these")
+        self.search_btn.setText("Filter")
+        self.tags_hint.setText(
+            "Filters your saved favorites on this computer (no searching the site). One tag per line; "
+            "<b>rating:explicit</b> / <b>rating:questionable</b> work, site extras like <b>sort:</b> don't. "
+            "Your blacklist applies here too.")
+        self.together_btn.setToolTip("Open the ticked favorites side by side")
+
+    def title(self) -> str:
+        return "♥ Favorites"
+
+    def can_load_more(self) -> bool:
+        return False
+
+    def _set_filter(self):
+        """Read the boxes and the blacklist into sets (plain tags and rating:…; other meta tags only work on the
+        site). A -tag in Include means exclude, as in a site search."""
+        self._include = self.include_edit.toPlainText()
+        typed = [t.lower() for t in api.split_tags(self._include)]
+        need = {t for t in typed if not t.startswith("-")}
+        avoid = {t.lstrip("-") for t in typed if t.startswith("-")}
+        avoid |= {t.lower().lstrip("-") for t in api.split_tags(self.exclude_edit.toPlainText())}
+        black = {t.lower().lstrip("-") for t in api.split_tags(self.win.cfg["blacklist"])} - need
+        self._need, self._avoid, self._black = need, avoid, black
+
+    @staticmethod
+    def _hits(post: Post, wanted: set[str]) -> bool:
+        """Does the post have any of these tags (rating:x compares the post's rating)?"""
+        tags = {t.lower() for t in post.tags}
+        rating = post.rating.lower()
+        return bool(tags & wanted) or any(t.startswith("rating:") and t[7:] in (rating, rating[:1]) for t in wanted)
+
+    def _matches(self, post: Post) -> bool:
+        tags = {t.lower() for t in post.tags}
+        plain = {t for t in self._need if ":" not in t}
+        ratings = {t for t in self._need if t.startswith("rating:")}
+        return plain <= tags and (not ratings or self._hits(post, ratings)) and not self._hits(post, self._avoid)
+
+    def search(self):
+        """Show the favorites matching the boxes (ticks on favorites still shown are kept)."""
+        kept = set(self.model.checked)
+        self.model.generation = next(_generations)
+        self.model.reset()
+        self._thumb_queue.clear()
+        self._set_filter()
+        posts, hidden = [], 0
+        for p in self.win.favorites.values():
+            if not self._matches(p):
+                continue
+            if self._hits(p, self._black):
+                hidden += 1
+                continue
+            posts.append(p)
+        self._blacklisted, self._hidden, self._paged, self._inflight = hidden, 0, False, False
+        self.page_bar.hide()
+        new = self.model.append(posts)
+        self.model.exhausted = True
+        self.model.checked = kept & {p.id for p in posts}
+        self._thumb_queue.extend(new)
+        self._pump_thumbs()
+        self._update_counts()
+
+    def favorite_changed(self, post: Post):
+        """Update in place (no reload, no re-downloading thumbnails, open post tabs keep their place): a new
+        favorite goes to the top if it matches; an unfavorited one stays until the next Filter, without its ♥."""
+        if post.id in self.win.favorites and post.id not in self.model._rows and self.model.generation:
+            if self._matches(post) and not self._hits(post, self._black):
+                self._thumb_queue.extend(self.model.insert_front(post))
+                self._pump_thumbs()
+        else:
+            self.model.mark_changed(post.id)
+        self._update_counts()
+
+    def _update_counts(self):
+        n = len(self.model.checked)
+        hidden = f" · {self._blacklisted} hidden by blacklist" if self._blacklisted else ""
+        total = len(self.win.favorites)
+        shown = sum(p.id in self.win.favorites for p in self.model.posts)
+        what = f"{shown} of {total} favorites" if shown != total else f"{total} favorites"
+        self.count_label.setText(f"{what} · {n} selected{hidden}")
+        self.dl_btn.setText(f"Download {n}")
+        self.together_btn.setEnabled(n >= 2)
+        self.slideshow_btn.setEnabled(bool(self.model.posts))

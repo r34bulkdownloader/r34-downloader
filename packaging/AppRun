@@ -1,0 +1,4 @@
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+export APPDIR="$HERE"
+exec "$APPDIR/usr/python/bin/python3" -I -m r34dl "$@"

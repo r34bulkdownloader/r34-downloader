@@ -1,3 +1,4 @@
+import json
 import stat
 
 import pytest
@@ -191,3 +192,49 @@ def test_settings_support_button_opens_kofi(qapp, monkeypatch):
     d = dialogs.SettingsDialog({**config.DEFAULTS}, None)
     [b for b in d.buttons.buttons() if "Ko-fi" in b.text()][0].click()
     assert opened == [dialogs.KOFI_URL] and d.result() == 0  # the dialog stays open
+
+
+def test_old_config_gets_site_defaults(tmp_path):
+    config.path().parent.mkdir(parents=True, exist_ok=True)
+    config.path().write_text('{"template": "x_{id}", "blacklist": "scat"}')
+    before = config.path().read_text()
+    cfg = config.load()
+    eh = config.site_cfg(cfg, "e-hentai")
+    assert cfg["template"] == "x_{id}" and config.site_cfg(cfg, "rule34.xxx") is cfg
+    assert eh["template"] == "ehentai_{album_id}_{page}" and eh["blacklist"] == ""
+    assert config.path().read_text() == before  # loading never rewrites
+
+
+def test_site_cfg_bad_types_fall_back():
+    cfg = {**config.DEFAULTS, "sites": {"e-hentai": {"template": 5, "followed": ["a"]}}}
+    eh = config.site_cfg(cfg, "e-hentai")
+    assert eh["template"] == "ehentai_{album_id}_{page}" and eh["followed"] == ["a"]
+
+
+def test_history_per_site():
+    config.add_history(5)
+    config.add_history(500001, site="e-hentai")
+    assert config.load_history() == {5}
+    assert config.load_history("e-hentai") == {500001}
+    assert config.history_path("e-hentai").name == "history-e-hentai.txt"
+    config.clear_history()
+    assert config.load_history("e-hentai") == set() and config.load_history() == set()
+
+
+def test_favorites_per_site_keep_rule34_file_untouched():
+    config.update_favorites(add={"site": "rule34.xxx", "id": 1, "hash": "h", "file_url": "https://x/a.jpg"})
+    before = config.favorites_path().read_text()
+    config.update_favorites(add={"site": "e-hentai", "id": 700000, "kind": "gallery",
+                                 "page_url": "https://e-hentai.org/g/7/abc/", "hash": "", "file_url": ""},
+                            site="e-hentai")
+    assert config.favorites_path().read_text() == before
+    assert [d["id"] for d in config.load_favorites("e-hentai")] == [700000]
+
+
+def test_secret_blanks_eh_cookies(tmp_path):
+    cfg = {**config.DEFAULTS, "secret": {"x": 1}}
+    config.site_cfg(cfg, "e-hentai").update(member_id="42", pass_hash="p")
+    config.save(cfg)
+    disk = json.loads(config.path().read_text())
+    assert disk["sites"]["e-hentai"]["member_id"] == "" and disk["sites"]["e-hentai"]["pass_hash"] == ""
+    assert config.site_cfg(cfg, "e-hentai")["member_id"] == "42"  # the in-memory copy is untouched

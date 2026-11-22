@@ -247,3 +247,22 @@ def test_site_cfg_returns_same_live_dict():
     assert eh is config.site_cfg(cfg, "e-hentai")
     eh["member_id"] = "9"
     assert config.site_cfg(cfg, "e-hentai")["member_id"] == "9" and cfg["sites"]["e-hentai"] is eh
+
+
+def test_settings_template_per_site(qapp):
+    from r34dl import dialogs
+    d = dialogs.SettingsDialog({**config.DEFAULTS, "sites": {}}, None)
+    assert d.site_box.findData("e-hentai") >= 0
+    d.template_edit.setText("r_{id}")
+    d.site_box.setCurrentIndex(d.site_box.findData("e-hentai"))
+    assert d.template_edit.text() == config.SITE_DEFAULTS["e-hentai"]["template"]
+    d.template_edit.setText("eh_{page}")
+    d.site_box.setCurrentIndex(d.site_box.findData("rule34.xxx"))
+    assert d.template_edit.text() == "r_{id}"
+    d.site_box.setCurrentIndex(d.site_box.findData("e-hentai"))
+    d.reset_btn.click()
+    assert d.template_edit.text() == config.SITE_DEFAULTS["e-hentai"]["template"]
+    d.template_edit.setText("eh_{page}")
+    d.accept()
+    out = d.result_cfg()
+    assert out["template"] == "r_{id}" and out["sites"]["e-hentai"]["template"] == "eh_{page}"

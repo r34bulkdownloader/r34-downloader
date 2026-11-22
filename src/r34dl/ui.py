@@ -354,7 +354,7 @@ class MainWindow(QMainWindow):
         self._store_tags()
         cur = self.current_search()
         dlg = SettingsDialog(self.cfg, cur.model.posts[0] if cur.model.posts else None, cur._include, self, self.nam,
-                             self._vault)
+                             self._vault, list(self.sites))
         accepted = dlg.exec() == QDialog.Accepted
         dlg.deleteLater()  # its password fields go with it
         if accepted:

@@ -128,7 +128,8 @@ KOFI_URL = "https://ko-fi.com/r34bulkdownloader"
 
 class SettingsDialog(QDialog):
     def __init__(self, cfg: dict, sample: Post | None, search: str = "", parent=None,
-                 nam: QNetworkAccessManager | None = None, vault: "secret.Vault | None" = None):
+                 nam: QNetworkAccessManager | None = None, vault: "secret.Vault | None" = None,
+                 sites: list[str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.vault = vault  # the unlocked password this session (secret.Vault); None = not protected/unlocked
@@ -144,6 +145,9 @@ class SettingsDialog(QDialog):
             tag_info={"some_artist": ("artist", 1), "some_character": ("character", 1),
                       "some_series": ("copyright", 1), "tag_one": ("general", 1)},
         )
+        self._eh_sample = Post(
+            700001004, "", "", "", "", [], "", 0, 0, 0, site="e-hentai", kind="page", file_name="004.jpg",
+            album={"gid": 7, "token": "", "title": "Some Album", "page": 4, "pages": 120, "category": ""})
         outer = QVBoxLayout(self)
 
         account = QGroupBox("Account")
@@ -209,10 +213,17 @@ class SettingsDialog(QDialog):
         dir_row.addWidget(self.dir_edit, 1)
         dir_row.addWidget(browse)
         form.addRow("Save folder", dir_row)
-        self.template_edit = QLineEdit(cfg["template"])
-        reset = QPushButton("Default")
-        reset.setToolTip(f"Reset to {config.DEFAULTS['template']}")
-        reset.clicked.connect(lambda: self.template_edit.setText(config.DEFAULTS["template"]))
+        self.site_box = QComboBox()
+        for name in sites or ["rule34.xxx", *config.SITE_DEFAULTS]:
+            self.site_box.addItem(name, name)
+        form.addRow("Site", self.site_box)
+        self._site = self.site_box.currentData()
+        self._templates = {}  # site -> template text, so switching sites keeps each one's edits
+        self.template_edit = QLineEdit(config.site_cfg(self._cfg, self._site)["template"])
+        self.reset_btn = reset = QPushButton("Default")
+        reset.clicked.connect(lambda: self.template_edit.setText(self._default_template()))
+        reset.setToolTip(f"Reset to {self._default_template()}")
+        self.site_box.currentIndexChanged.connect(self._site_changed)
         tpl_row = QHBoxLayout()
         tpl_row.addWidget(self.template_edit, 1)
         tpl_row.addWidget(reset)
@@ -221,7 +232,8 @@ class SettingsDialog(QDialog):
             "Build the name from these pieces: <b>{id}</b> post number · <b>{hash}</b> · <b>{tags}</b> all tags · "
             "<b>{tags:5}</b> first 5 tags · <b>{artist}</b> · <b>{character}</b> · <b>{copyright}</b> · "
             "<b>{rating}</b> · <b>{score}</b> · <b>{width}</b> · <b>{height}</b> · <b>{search}</b> your include tags · "
-            "<b>{index}</b> position in the download (001, 002…). A <b>/</b> makes a subfolder, e.g. <b>{rating}/{id}</b>. "
+            "<b>{index}</b> position in the download (001, 002…) · <b>{site}</b> · <b>{album}</b> album title · "
+            "<b>{album_id}</b> · <b>{page}</b> page number (e-hentai). A <b>/</b> makes a subfolder, e.g. <b>{rating}/{id}</b>. "
             "The file extension is added for you."))
         self.preview = QLabel()
         self.preview.setWordWrap(True)
@@ -386,10 +398,25 @@ class SettingsDialog(QDialog):
         if d:
             self.dir_edit.setText(d)
 
+    def _default_template(self) -> str:
+        return config.DEFAULTS["template"] if self._site == "rule34.xxx" else config.SITE_DEFAULTS[self._site]["template"]
+
+    def _store_template(self):
+        self._templates[self._site] = self.template_edit.text()
+
+    def _site_changed(self):
+        self._store_template()
+        self._site = self.site_box.currentData()
+        text = self._templates.get(self._site) or config.site_cfg(self._cfg, self._site)["template"]
+        self.reset_btn.setToolTip(f"Reset to {self._default_template()}")
+        self.template_edit.setText(text)
+        self._update_preview()
+
     def _update_preview(self):
         try:
             base = expand_dir(self.dir_edit.text().strip() or ".")
-            path = naming.target_path(base, self.template_edit.text(), self._sample, self._search)
+            sample = self._sample if self._site == "rule34.xxx" else self._eh_sample
+            path = naming.target_path(base, self.template_edit.text(), sample, self._search)
             self.preview.setStyleSheet("")
             self.preview.setText(str(path.relative_to(base)))
             ok = True
@@ -400,10 +427,14 @@ class SettingsDialog(QDialog):
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(ok)
 
     def accept(self):
+        self._store_template()
+        for site, text in self._templates.items():
+            if site != "rule34.xxx":
+                config.site_cfg(self._cfg, site)["template"] = text
         self._cfg.update(
             user_id=self.user_edit.text().strip(), api_key=self.key_edit.text().strip(),
             save_dir=str(expand_dir(self.dir_edit.text().strip() or self._cfg["save_dir"])),
-            template=self.template_edit.text(), start_muted=self.muted_check.isChecked(), loop_videos=self.loop_check.isChecked(),
+            template=self._templates.get("rule34.xxx", self._cfg["template"]), start_muted=self.muted_check.isChecked(), loop_videos=self.loop_check.isChecked(),
             remember_include=self.remember_check.isChecked(), hide_downloaded=self.hide_check.isChecked(),
             blacklist=self.blacklist_edit.toPlainText(), infinite_scroll=self.infinite_check.isChecked(),
             theme=self.theme_box.currentData(), hover_preview=self.hover_check.isChecked(),

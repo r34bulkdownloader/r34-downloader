@@ -7,6 +7,8 @@ import re
 import socket
 from urllib.parse import quote, urlparse
 
+from PySide6.QtCore import QUrl
+
 from ..models import Post
 
 EH = "https://e-hentai.org"
@@ -143,16 +145,31 @@ def parse_picture(html: str) -> tuple[str, str | None]:
     return shown, htmllib.unescape(full.group(1)) if full else None
 
 
+def _ip_ok(ip) -> bool:
+    if ip.version == 6:  # judge an embedded IPv4 by the IPv4 rules
+        n = int(ip)
+        if ip.ipv4_mapped or ip.sixtofour:
+            return (ip.ipv4_mapped or ip.sixtofour).is_global
+        if n >> 32 == 0 or n >> 32 == 0x64FF9B << 64:  # ::/96 (IPv4-compatible), 64:ff9b::/96 (NAT64)
+            return ipaddress.IPv4Address(n & 0xFFFFFFFF).is_global
+    return ip.is_global
+
+
 def safe_image_url(url: str) -> bool:
     try:
-        u = urlparse(url)
-        host = (u.hostname or "").rstrip(".")
+        raw = urlparse(url).netloc
     except ValueError:
         return False
-    if u.scheme not in ("http", "https") or not host or host == "localhost" or host.endswith(".localhost"):
+    if not raw.isascii() or "%" in raw:
+        return False  # Qt would normalise Unicode dots / %2e into a different host than we checked
+    q = QUrl(url)
+    host = q.host().rstrip(".").lower()  # the host Qt will actually connect to
+    if not q.isValid() or q.scheme() not in ("http", "https") or not host:
         return False
-    # numeric IPv4 forms (2130706433, 0x7f000001, 127.1, 0177...) that QUrl normalises to dotted-quad
-    if re.fullmatch(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+))*", host, re.I):
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    # numeric IPv4 forms (2130706433, 0x7f000001, 127.1, 0177...)
+    if re.fullmatch(r"(0x[0-9a-f]*|\d+)(\.(0x[0-9a-f]*|\d+))*", host):
         try:
             return ipaddress.ip_address(socket.inet_aton(host)).is_global
         except OSError:
@@ -161,4 +178,4 @@ def safe_image_url(url: str) -> bool:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return True  # a host name; shortcut: one that resolves to a private IP is out of scope for this pure check
-    return ip.is_global
+    return _ip_ok(ip)

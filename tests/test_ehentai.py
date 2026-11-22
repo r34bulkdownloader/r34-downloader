@@ -160,8 +160,13 @@ def test_safe_image_url():
     assert safe_image_url("http://81.2.3.4:8080/h/x.jpg")
     for bad in ("http://127.0.0.1/x", "http://192.168.1.2/x", "http://localhost/x", "file:///etc/passwd",
                 "http://[::1]/x", "http://169.254.1.1/x", "http://2130706433/", "http://0x7f000001/",
-                "http://127.1/", "http://017700000001/", "http://100.64.0.1/"):
+                "http://127.1/", "http://017700000001/", "http://100.64.0.1/", "http://127\uff0e0\uff0e0\uff0e1/x",
+                "http://127%2e0.0.1/x", "http://127\uff610\uff610\uff611/x", "http://127\u30020\u30020\u30021/x",
+                "http://[::127.0.0.1]/x", "http://[64:ff9b::7f00:1]/x", "http://[::ffff:10.0.0.1]/x",
+                "http://[2002:7f00:1::]/x"):
         assert not safe_image_url(bad)
+    assert safe_image_url("http://8.8.8.8/x") and safe_image_url("http://[2606:4700::1111]/x")
+    assert safe_image_url("http://[64:ff9b::808:808]/x")  # NAT64 of a public IPv4
     assert safe_image_url("https://beef.cafe/x.jpg")  # hex-looking host name is still a name
     assert safe_image_url("https://dpncxca.dxnltjxeaefj.hath.network:31209/h/a/2.webp")
     assert not safe_image_url("http://10.0.0.1/x") and not safe_image_url("http://LOCALHOST./x")

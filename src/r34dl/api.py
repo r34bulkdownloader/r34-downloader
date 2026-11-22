@@ -31,6 +31,14 @@ def scrub(text: str) -> str:
     return home_short(_SECRET_RE.sub(r"\1=***", text))
 
 
+def parse_credentials(text: str) -> tuple[str | None, str | None]:
+    """(user_id, api_key) found in what the user pasted: the line rule34.xxx shows under API Access Credentials
+    ("&api_key=…&user_id=…", either order), a whole URL with them, or just one "name=value". None = not there."""
+    uid = re.search(r"user_id=\s*(\d+)", text)
+    key = re.search(r"api_key=\s*([0-9A-Za-z]+)", text)
+    return (uid.group(1) if uid else None), (key.group(1) if key else None)
+
+
 def home_short(text: str) -> str:
     home = os.path.expanduser("~").rstrip("/")
     if len(home) <= 1:

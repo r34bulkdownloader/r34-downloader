@@ -6,7 +6,7 @@ reasonably recent distribution without installing anything.
 
 **18+ only.** This is a tool for an adult website.
 
-Current version: **1.0.0**
+Current version: **1.0.1**
 
 ![Search tab: tag boxes on the left, results grid with tick boxes, favorite and downloaded marks](screenshots/search.png)
 
@@ -104,8 +104,9 @@ Names are cleaned for the file system and shortened if too long; an existing fil
 
 ## Getting an API key
 
-On rule34.xxx: My Account → Options → **API Access Credentials**. Copy your user ID and API key into the app's
-Settings (it opens by itself the first time).
+On rule34.xxx: My Account → Options → **API Access Credentials**. Copy the whole line shown there (it looks
+like `&api_key=…&user_id=…`) and paste it into **Paste from site** in the app's Settings, which opens by itself
+the first time. The User ID and API key are filled in for you.
 
 ## Run
 

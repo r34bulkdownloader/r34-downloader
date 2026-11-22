@@ -191,3 +191,20 @@ def test_scrub_hides_the_home_folder(monkeypatch):
     assert api.scrub("can't write /home/someone/Downloads/x.jpg") == "can't write ~/Downloads/x.jpg"
     assert api.scrub("/home/someone2/x") == "/home/someone2/x"  # only the real home, not a prefix of another
     assert api.home_short("/home/someone") == "~"
+
+
+FAKE_KEY = "ab12" * 32
+
+
+@pytest.mark.parametrize("text", [
+    f"&api_key={FAKE_KEY}&user_id=7654321",
+    f"&user_id=7654321&api_key={FAKE_KEY}",
+    f"  https://api.rule34.xxx/index.php?page=dapi&s=post&q=index&api_key={FAKE_KEY}&user_id=7654321\n",
+])
+def test_parse_credentials_reads_the_sites_line(text):
+    assert api.parse_credentials(text) == ("7654321", FAKE_KEY)
+
+
+def test_parse_credentials_partial_and_garbage():
+    assert api.parse_credentials("user_id=42") == ("42", None)
+    assert api.parse_credentials("hello") == (None, None)

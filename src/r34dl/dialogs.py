@@ -145,6 +145,14 @@ class SettingsDialog(QDialog):
 
         account = QGroupBox("Account")
         form = QFormLayout(account)
+        self.paste_edit = QLineEdit()
+        self.paste_edit.setPlaceholderText("&api_key=…&user_id=…")
+        self.paste_edit.setToolTip("Paste the whole line from the site; the User ID and API key are filled in for you")
+        self.paste_edit.textChanged.connect(self._pasted_line)
+        form.addRow("Paste from site", self.paste_edit)
+        self.paste_status = hint_label("")
+        self.paste_status.hide()
+        form.addRow(self.paste_status)
         self.user_edit = QLineEdit(cfg["user_id"])
         self.user_edit.setPlaceholderText("e.g. 1234567")
         self.key_edit = QLineEdit(cfg["api_key"])
@@ -156,10 +164,12 @@ class SettingsDialog(QDialog):
         key_row.addWidget(show)
         form.addRow("User ID", self.user_edit)
         form.addRow("API key", key_row)
+        for edit in (self.user_edit, self.key_edit):  # the whole line pasted into one field works too
+            edit.textChanged.connect(lambda text, e=edit: self._split_field(e, text))
         form.addRow(hint_label(
             'Log in on rule34.xxx, open <a href="https://rule34.xxx/index.php?page=account&s=options">'
-            "My Account → Options</a> and copy both values from <b>API Access Credentials</b>. "
-            "They are saved only on this computer.", links=True))
+            "My Account → Options</a>, copy the whole line under <b>API Access Credentials</b> (it starts with "
+            "<b>&amp;api_key=</b>) and paste it in the first box. They are saved only on this computer.", links=True))
         self.protect_check = QCheckBox("Protect my User ID and API key with a password")
         self.protect_check.setChecked(self._was_protected)
         self.protect_check.toggled.connect(self._update_password_rows)
@@ -285,6 +295,38 @@ class SettingsDialog(QDialog):
         w = max(self.width(), self.minimumWidth())
         self.resize(w, max(self.height(), self.layout().totalHeightForWidth(w)))
         self._update_preview()
+
+    def _fill(self, uid: str | None, key: str | None):
+        for edit, value in ((self.user_edit, uid), (self.key_edit, key)):
+            if value is not None and edit.text() != value:
+                edit.blockSignals(True)
+                edit.setText(value)
+                edit.blockSignals(False)
+
+    def _pasted_line(self, text: str):
+        if not text.strip():
+            return
+        uid, key = api.parse_credentials(text)
+        if uid and key:
+            self._fill(uid, key)
+            self.paste_edit.blockSignals(True)
+            self.paste_edit.clear()  # don't leave the key readable on screen
+            self.paste_edit.blockSignals(False)
+            self.paste_status.setText("✓ User ID and API key filled in. Press OK to save.")
+        else:
+            missing = " and ".join(n for n, v in (("api_key=", key), ("user_id=", uid)) if not v)
+            self.paste_status.setText(f"That doesn't look like the whole line: no <b>{missing}</b> in it. "
+                                      "Copy everything under API Access Credentials.")
+        self.paste_status.show()
+
+    def _split_field(self, edit: QLineEdit, text: str):
+        """The line (or "api_key=…" / "user_id=…") pasted into the User ID or API key field: keep only the values."""
+        if "=" in text:
+            self._fill(*api.parse_credentials(text))
+            if "=" in edit.text():  # this field's own value wasn't in the text
+                edit.blockSignals(True)
+                edit.clear()
+                edit.blockSignals(False)
 
     def _update_password_rows(self, *_):
         protect = self.protect_check.isChecked()

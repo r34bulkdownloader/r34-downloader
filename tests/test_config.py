@@ -161,3 +161,24 @@ def test_other_window_cannot_silently_unprotect():
     assert disk["secret"] == {"v": 1, "data": "x"} and disk["api_key"] == ""
     config.save({**cfg, "secret": {}}, unprotect=True)  # turning it off on purpose still works
     assert config.load()["secret"] == {}
+
+
+def test_settings_paste_box_fills_both_fields(qapp):
+    from r34dl.dialogs import SettingsDialog
+    key = "cd34" * 32
+    d = SettingsDialog({**config.DEFAULTS}, None)
+    d.paste_edit.setText(f"&api_key={key}&user_id=7654321")
+    assert (d.user_edit.text(), d.key_edit.text()) == ("7654321", key)
+    assert d.paste_edit.text() == "" and "filled in" in d.paste_status.text()
+    d.paste_edit.setText("just some text")
+    assert "api_key=" in d.paste_status.text() and d.key_edit.text() == key  # nothing overwritten
+
+
+def test_settings_whole_line_pasted_into_one_field(qapp):
+    from r34dl.dialogs import SettingsDialog
+    key = "ef56" * 32
+    d = SettingsDialog({**config.DEFAULTS}, None)
+    d.user_edit.setText(f"&api_key={key}&user_id=1112223")
+    assert (d.user_edit.text(), d.key_edit.text()) == ("1112223", key)
+    d.key_edit.setText("api_key=")  # half a line: the field doesn't keep "api_key="
+    assert d.key_edit.text() == ""

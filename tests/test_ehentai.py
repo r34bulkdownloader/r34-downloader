@@ -1,0 +1,165 @@
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+from r34dl.models import TAG_KINDS, Post
+from r34dl.sites.ehentai import (EH, GalleryWarning, ImageLimit, build_query, gallery_url, gdata_body,
+                                 parse_gallery, parse_gdata, parse_picture, parse_search, safe_image_url,
+                                 search_url, split_tags)
+
+FIX = Path(__file__).parent / "fixtures" / "eh"
+
+
+def fixture(name):
+    return (FIX / name).read_text(encoding="utf-8")
+
+
+def fixture_bytes(name):
+    return (FIX / name).read_bytes()
+
+
+def gallery_post():
+    return [g for g in parse_gdata(fixture_bytes("gdata.json")) if g.album["gid"] == 4348914][0]
+
+
+def test_split_tags():
+    assert split_tags(" female:big breasts , artist:foo\n\n other ") == ["female:big breasts", "artist:foo", "other"]
+
+
+def test_build_query_quotes_spaces():
+    q = build_query('female:big breasts\nartist:"foo"', "language:english", ["guro"])
+    assert q == 'female:"big breasts$" artist:"foo$" -language:"english$" -"guro$"'
+
+
+def test_build_query_leading_minus_excludes():
+    assert build_query("-male:yaoi, x", "", []) == '-male:"yaoi$" "x$"'
+    assert build_query('-, female:, ""', "", []) == ""
+
+
+def test_search_url():
+    assert search_url('a:"b$"', None) == f"{EH}/?f_search=a%3A%22b%24%22&inline_set=dm_l&nw=always"
+    assert search_url("x", 4348909).endswith("&nw=always&next=4348909")
+
+
+def test_parse_search_fixture():
+    pairs, nxt = parse_search(fixture("search.html"))
+    assert len(pairs) >= 20 and all(isinstance(g, int) and re.fullmatch(r"[0-9a-f]{10}", t) for g, t in pairs)
+    assert isinstance(nxt, int)
+    assert pairs[0] == (4348999, "ff9bd7b6f9") and nxt == 4348909
+    assert len(set(pairs)) == len(pairs)
+
+
+def test_parse_search_no_hits():
+    assert parse_search("<p>No hits found</p>") == ([], None)
+
+
+def test_gdata_body():
+    body = json.loads(gdata_body([(i, "abcdef0123") for i in range(30)]))
+    assert body["method"] == "gdata" and body["namespace"] == 1 and len(body["gidlist"]) == 25
+    assert body["gidlist"][0] == [0, "abcdef0123"]
+
+
+def test_parse_gdata_maps_tags():
+    g = parse_gdata(fixture_bytes("gdata.json"))[0]
+    assert g.kind == "gallery" and g.id == g.album["gid"] * 100000 and g.album["pages"] > 0
+    assert all(g.tag_info[t][0] in TAG_KINDS for t in g.tags)
+
+
+def test_parse_gdata_values():
+    gs = parse_gdata(fixture_bytes("gdata.json"))
+    assert len(gs) == 3  # the error entry is skipped
+    g = gs[0]
+    assert g.site == "e-hentai" and g.hash == "" and g.file_url == ""
+    assert g.page_url == f"{EH}/g/4348910/0de3268f6d/" and g.preview_url.startswith("https://")
+    assert g.rating == "western" and g.score == 39
+    assert g.album == {"gid": 4348910, "token": "0de3268f6d", "title": "[ENFman] Holly Pittstein",
+                       "pages": 43, "category": "Western"}
+    assert g.tag_info["artist:enfman"] == ("artist", 0)
+    assert g.tag_info["language:english"] == ("meta", 0)
+    assert g.tag_info["female:bbw"] == ("general", 0)
+
+
+def test_parse_gdata_skips_non_https_thumb():
+    body = json.dumps({"gmetadata": [{"gid": 1, "token": "abcdef0123", "title": "t", "category": "Misc",
+                                      "thumb": "http://x/y.jpg", "filecount": "1", "rating": "1", "tags": []}]})
+    assert parse_gdata(body.encode()) == []
+
+
+def test_tag_kinds_namespaces():
+    body = json.dumps({"gmetadata": [{"gid": 1, "token": "abcdef0123", "title": "t", "category": "Misc",
+                                      "thumb": "https://x/y.jpg", "filecount": "1", "rating": "4.5",
+                                      "tags": ["group:g", "parody:p", "character:c", "reclass:r",
+                                               "cosplayer:z", "mixed:m", "plain", "weird:w"]}]})
+    g = parse_gdata(body.encode())[0]
+    assert {t: k for t, (k, _) in g.tag_info.items()} == {
+        "group:g": "artist", "parody:p": "copyright", "character:c": "character", "reclass:r": "meta",
+        "cosplayer:z": "meta", "mixed:m": "general", "plain": "general", "weird:w": "general"}
+    assert g.score == 45
+
+
+def test_gallery_url():
+    assert gallery_url(4348914, "5b28fed69e", 1) == f"{EH}/g/4348914/5b28fed69e/?p=1"
+    assert gallery_url(4348914, "5b28fed69e", 0) == f"{EH}/g/4348914/5b28fed69e/"
+
+
+def test_parse_gallery_pages_and_next():
+    g = gallery_post()
+    pages, nxt = parse_gallery(fixture("gallery.html"), g)
+    assert len(pages) == 20 and nxt == 1
+    p = pages[3]
+    assert p.id == 4348914 * 100000 + 4 and p.kind == "page" and p.site == "e-hentai"
+    assert p.page_url == f"{EH}/s/1218b3f3be/4348914-4"
+    assert p.file_name == "2.png" and p.ext == "png"
+    assert p.preview_url == "https://zurswtyclg.hath.network/c2/pb1pgi2ukx8s9q1a5y/4348914-0.webp"
+    assert p.album["sprite"] == (600, 0, 200, 113)
+    assert p.album["page"] == 4 and p.album["gid"] == 4348914 and p.album["title"] == g.album["title"]
+    assert p.tags == g.tags and p.tag_info == g.tag_info
+    assert "sprite" not in g.album  # the gallery's album is not shared/mutated
+    pages2, nxt2 = parse_gallery(fixture("gallery_p2.html"), g)
+    assert [p.album["page"] for p in pages2] == list(range(21, 41)) and nxt2 == 2
+
+
+def test_parse_gallery_last_page_and_foreign_links():
+    html = fixture("gallery.html")
+    html = re.sub(r'<td onclick="[^"]*"><a href="[^"]*\?p=1" onclick="return false">&gt;</a></td>',
+                  '<td class="ptdd">&gt;</td>', html)
+    html = html.replace("https://e-hentai.org/s/b2e9e709e1/", "https://evil.example/s/b2e9e709e1/")
+    pages, nxt = parse_gallery(html, gallery_post())
+    assert nxt is None and len(pages) == 19 and pages[0].album["page"] == 2
+
+
+def test_parse_gallery_content_warning():
+    with pytest.raises(GalleryWarning):
+        parse_gallery(fixture("warning.html"), gallery_post())
+
+
+def test_parse_picture_shown_and_original():
+    shown, orig = parse_picture(fixture("picture_original.html"))
+    assert shown.startswith("https://dpncxca.dxnltjxeaefj.hath.network:31209/h/") and shown.endswith("/2.webp")
+    assert orig == f"{EH}/fullimg/4348914/4/14j5vtiaotb/2.png"
+
+
+def test_parse_picture_without_original():
+    shown, orig = parse_picture(fixture("picture.html"))
+    assert shown.endswith("/2.webp") and orig is None
+
+
+def test_parse_picture_509():
+    with pytest.raises(ImageLimit):
+        parse_picture(fixture("picture_509.html"))
+
+
+def test_parse_picture_no_img():
+    with pytest.raises(ValueError):
+        parse_picture("<html></html>")
+
+
+def test_safe_image_url():
+    assert safe_image_url("http://81.2.3.4:8080/h/x.jpg")
+    for bad in ("http://127.0.0.1/x", "http://192.168.1.2/x", "http://localhost/x", "file:///etc/passwd",
+                "http://[::1]/x", "http://169.254.1.1/x"):
+        assert not safe_image_url(bad)
+    assert safe_image_url("https://dpncxca.dxnltjxeaefj.hath.network:31209/h/a/2.webp")
+    assert not safe_image_url("http://10.0.0.1/x") and not safe_image_url("http://LOCALHOST./x")

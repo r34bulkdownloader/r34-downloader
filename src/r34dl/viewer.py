@@ -19,11 +19,23 @@ from PySide6.QtWidgets import (
 
 from . import api
 from .models import TAG_KINDS, Post
+from .sites.ehclient import CANCELLED
 from .grid import ResultsModel
 from .theme import readable
 from .widgets import DETAIL_MAX_PIXELS, VIDEO_EXT, FullscreenWindow, VideoView, hint_label, open_in_browser
 
 log = logging.getLogger(__name__)
+IMAGE_LIMIT_TEXT = ("e-hentai's image limit is reached. Try again later, or log in in Settings "
+                    "for a higher limit.")
+
+
+def resolve_error(err: str) -> str:
+    return IMAGE_LIMIT_TEXT if err == "IMAGE_LIMIT" else err
+
+
+def known(post: Post, cb):
+    cb(post, None)  # resolve=None: file_url is already known
+
 
 class ZoomView(QGraphicsView):
     """A still image: fits the window; the mouse wheel zooms toward the pointer, drag to pan, double-click resets.
@@ -228,9 +240,10 @@ class ViewerTab(QWidget):
 
     def __init__(
         self, post: Post, model: ResultsModel, nam: QNetworkAccessManager, start_muted: bool = True,
-        loop: bool = True,
+        loop: bool = True, resolve=None,
     ):
         super().__init__()
+        self._resolve = resolve or known
         self.post = post
         self.model = model
         self._nam = nam
@@ -411,14 +424,29 @@ class ViewerTab(QWidget):
         self._released = False
         self.post = post
         self.tag_list.set_post(post)
-        self.info.setText(f"#{post.id} · {post.width}×{post.height} · score {post.score} · rating {post.rating}")
+        if post.site == "e-hentai":
+            a = post.album
+            self.info.setText(f"{a.get('title', '')} · page {a.get('page', '?')} of {a.get('pages', '?')} · "
+                              f"{a.get('category', '')}")
+        else:
+            self.info.setText(f"{post.label} · {post.width}×{post.height} · score {post.score} · rating {post.rating}")
         if self._fs is not None:
             self.fs_info.setText(self.info.text())
             QTimer.singleShot(0, self._fs, self._fs.poke)  # after the controls show/hide: re-fit the bar
         self._sync_selected()
         self.update_favorite()
-        self.title_changed.emit(f"#{post.id}")
-        if post.ext in VIDEO_EXT:
+        self.title_changed.emit(post.label)
+        token = self._load_id
+        self._resolve(post, lambda p, err: self._on_resolved(token, p, err))
+
+    def _on_resolved(self, token: int, post: Post, err: str | None):
+        if token != self._load_id or self._released or post is not self.post:
+            return  # another post is showing now
+        if err == CANCELLED:
+            return  # silent: the request was dropped on purpose
+        if err:
+            self._show_error(resolve_error(err))
+        elif post.ext in VIDEO_EXT:
             self._start_video()
         else:
             req = api.request(post.file_url)

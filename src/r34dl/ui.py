@@ -240,13 +240,18 @@ class MainWindow(QMainWindow):
         tab.search()
         return tab
 
+    def resolve(self, post: Post, cb):
+        """Find the post's file address for viewing, then cb(post, error or None)."""
+        self.sites[post.site].resolve(post, False, cb)
+
     def open_viewer(self, post: Post, background: bool, origin: SearchTab | None = None,
                     model: ResultsModel | None = None):
         """model: step through these posts instead of a search's results (a Together tab's selection)."""
         if model is None:
             origin = origin or self.current_search()
             model = origin.model
-        tab = ViewerTab(post, model, self.nam, start_muted=self.cfg["start_muted"], loop=self.cfg["loop_videos"])
+        tab = ViewerTab(post, model, self.nam, start_muted=self.cfg["start_muted"], loop=self.cfg["loop_videos"],
+                        resolve=self.resolve)
         tab.origin = origin
         tab.title_changed.connect(lambda t: self.set_tab_title(tab, t))
         if origin is not None:
@@ -256,12 +261,12 @@ class MainWindow(QMainWindow):
         tab._update_nav()
         search = origin._include if origin else ""  # the post's search, even if that tab searches again later
         tab.download_requested.connect(lambda p: self.download_posts([p], search))
-        tab.is_favorite = lambda pid: pid in self.favorites[post.site]  # a tab steps through one site's posts
-        tab.is_followed = lambda tag: self.is_followed(tag, post.site)
+        tab.is_favorite = lambda pid: pid in self.favorites[tab.post.site]  # the post shown now
+        tab.is_followed = lambda tag: self.is_followed(tag, tab.post.site)
         tab.update_favorite()
         tab.favorite_toggled.connect(self.toggle_favorite)
         tab.tag_action.connect(lambda action, tag: self._tag_action(tab.origin, action, tag))
-        i = self.tabs.addTab(tab, f"#{post.id}")
+        i = self.tabs.addTab(tab, post.label)
         if not background:
             self.tabs.setCurrentIndex(i)
 
@@ -280,9 +285,9 @@ class MainWindow(QMainWindow):
         if self.slideshow is not None:
             self.slideshow.close()
         show = self.slideshow = Slideshow(ticked if only else list(tab.model.posts), self.nam, opts,
-                                          origin=None if only else tab)
-        search = tab._include
-        show.is_favorite = lambda pid: pid in self.favorites[tab.site.name]
+                                          origin=None if only else tab, resolve=self.resolve)
+        search, site = tab._include, tab.site.name  # the tab may switch site while the show runs
+        show.is_favorite = lambda pid: pid in self.favorites[site]
         show.favorite_toggled.connect(self.toggle_favorite)
         show.download_requested.connect(lambda p: self.download_posts([p], search))
         show.on_close = self._slideshow_closed
@@ -295,7 +300,7 @@ class MainWindow(QMainWindow):
     def open_together(self, posts: list[Post]):
         if len(posts) < 2:
             return
-        tab = TogetherTab(posts, self.nam)
+        tab = TogetherTab(posts, self.nam, resolve=self.resolve)
         tab.open_requested.connect(lambda p: self.open_viewer(p, False, None, tab.model))
         self.tabs.setCurrentIndex(self.tabs.addTab(tab, f"Together ({len(posts)})"))
 

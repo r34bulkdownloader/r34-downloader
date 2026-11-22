@@ -266,3 +266,14 @@ def test_settings_template_per_site(qapp):
     d.accept()
     out = d.result_cfg()
     assert out["template"] == "r_{id}" and out["sites"]["e-hentai"]["template"] == "eh_{page}"
+
+
+def test_settings_rejects_invalid_template_on_other_site(qapp, monkeypatch):
+    from r34dl import dialogs
+    monkeypatch.setattr(dialogs.QMessageBox, "warning", lambda *a, **k: None)
+    d = dialogs.SettingsDialog({**config.DEFAULTS, "sites": {}}, None)
+    d.site_box.setCurrentIndex(d.site_box.findData("e-hentai"))
+    d.template_edit.setText("{nope}")
+    d.site_box.setCurrentIndex(d.site_box.findData("rule34.xxx"))
+    d.accept()
+    assert d.result() != dialogs.QDialog.Accepted and d.site_box.currentData() == "e-hentai"

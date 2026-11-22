@@ -1,5 +1,6 @@
 """Windows: unlock (master password), log viewer, Settings."""
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import (
     Qt, QTimer, QUrl,
@@ -412,11 +413,22 @@ class SettingsDialog(QDialog):
         self.template_edit.setText(text)
         self._update_preview()
 
+    def _sample_for(self, site: str) -> Post:
+        return self._sample if site == "rule34.xxx" else self._eh_sample
+
+    def _bad_site(self) -> str | None:
+        """The first site whose stored template doesn't render, or None."""
+        for site, text in self._templates.items():
+            try:
+                naming.target_path(Path("."), text, self._sample_for(site), self._search)
+            except ValueError:
+                return site
+        return None
+
     def _update_preview(self):
         try:
             base = expand_dir(self.dir_edit.text().strip() or ".")
-            sample = self._sample if self._site == "rule34.xxx" else self._eh_sample
-            path = naming.target_path(base, self.template_edit.text(), sample, self._search)
+            path = naming.target_path(base, self.template_edit.text(), self._sample_for(self._site), self._search)
             self.preview.setStyleSheet("")
             self.preview.setText(str(path.relative_to(base)))
             ok = True
@@ -428,6 +440,10 @@ class SettingsDialog(QDialog):
 
     def accept(self):
         self._store_template()
+        if (bad := self._bad_site()) is not None:
+            self.site_box.setCurrentIndex(self.site_box.findData(bad))  # shows its error in the preview
+            QMessageBox.warning(self, "Bad filename template", f"The file name for {bad} is not valid.")
+            return
         for site, text in self._templates.items():
             if site != "rule34.xxx":
                 config.site_cfg(self._cfg, site)["template"] = text

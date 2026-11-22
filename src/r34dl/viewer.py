@@ -6,7 +6,8 @@ from PySide6.QtCore import (
     QBuffer, QByteArray, QIODevice, QSize, Qt, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QGuiApplication, QImage, QImageReader, QKeySequence, QMovie, QPainter, QPixmap, QShortcut,
+    QColor, QFont, QGuiApplication, QImage, QImageReader, QKeySequence, QMovie, QPainter, QPalette, QPixmap,
+    QShortcut,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 from . import api
 from .models import TAG_KINDS, Post
 from .grid import ResultsModel
+from .theme import readable
 from .widgets import DETAIL_MAX_PIXELS, VIDEO_EXT, FullscreenWindow, VideoView, hint_label, open_in_browser
 
 log = logging.getLogger(__name__)
@@ -162,7 +164,15 @@ class TagList(QListWidget):
 
     activated_tag = Signal(str, bool)  # tag, background
 
+    _post: Post | None = None
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == e.Type.PaletteChange and self._post is not None:
+            self.set_post(self._post)  # the theme changed: recolour the tags for the new background
+
     def set_post(self, post: Post):
+        self._post = post
         self.clear()
         if not post.tag_info:  # the site sent no types: plain list
             for t in post.tags:
@@ -179,8 +189,9 @@ class TagList(QListWidget):
             head.setFont(bold)
             head.setFlags(Qt.ItemIsEnabled)  # a heading: readable, but not selectable or a tag
             self.addItem(head)
+            color = readable(TAG_COLORS[kind], self.palette().color(QPalette.Base))  # on any theme
             for t in tags:
-                self._add_tag(t, TAG_COLORS[kind], post.tag_info.get(t, ("other", None))[1])
+                self._add_tag(t, color, post.tag_info.get(t, ("other", None))[1])
 
     def _add_tag(self, tag: str, color: QColor | None, count: int | None):
         item = QListWidgetItem(f"  {tag}  {count:,}" if count is not None else tag)

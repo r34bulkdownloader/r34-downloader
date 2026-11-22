@@ -2,10 +2,10 @@
 import logging
 
 from PySide6.QtCore import (
-    Qt, QTimer,
+    Qt, QTimer, QUrl,
 )
 from PySide6.QtGui import (
-    QGuiApplication, QTextCursor,
+    QDesktopServices, QGuiApplication, QTextCursor,
 )
 from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
@@ -121,6 +121,9 @@ class LogDialog(QDialog):
         text = applog.text(errors_only=self.filter.currentIndex() == 1)
         self.view.setPlainText(text or "Nothing logged yet.")
         self.view.moveCursor(QTextCursor.End)
+
+
+KOFI_URL = "https://ko-fi.com/r34bulkdownloader"
 
 
 class SettingsDialog(QDialog):
@@ -284,6 +287,9 @@ class SettingsDialog(QDialog):
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         show_log = self.buttons.addButton("Show log…", QDialogButtonBox.HelpRole)
         show_log.clicked.connect(lambda: LogDialog(self).exec())
+        support = self.buttons.addButton("☕ Support on Ko-fi", QDialogButtonBox.HelpRole)
+        support.setToolTip(f"Optional: buy the project a coffee ({KOFI_URL})")
+        support.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(KOFI_URL)))
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         outer.addWidget(self.buttons)

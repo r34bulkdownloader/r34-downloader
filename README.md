@@ -6,7 +6,7 @@ reasonably recent distribution without installing anything.
 
 **18+ only.** This is a tool for an adult website.
 
-Current version: **1.0.1**
+Current version: **1.1.0**
 
 ![Search tab: tag boxes on the left, results grid with tick boxes, favorite and downloaded marks](screenshots/search.png)
 
@@ -97,7 +97,8 @@ Names are cleaned for the file system and shortened if too long; an existing fil
 (`_1`, `_2`… is added).
 
 ### Look and privacy
-- **Themes:** System (follows the desktop), Light, Dark, Black (OLED). Applied instantly.
+- **Themes:** System (follows the desktop), Light, Dark, Black (OLED), R34 (greens), Sunset, Midnight, Pink,
+  Black & Gold. Applied instantly; tag colours adjust to stay readable on each.
 - **Optional master password** for the User ID and API key: encrypted with scrypt + AES-GCM, asked once at
   startup. A forgotten password can't be recovered; you enter the key again from your rule34.xxx account.
 - **Log viewer** (Settings → Show log…). API keys are removed from every log line.
@@ -163,4 +164,4 @@ This project isn't affiliated with rule34.xxx. Follow the site's rules and your 
 
 ## Plans
 
-See [TODO.md](TODO.md): more themes, other boorus, and e-hentai.org album support.
+See [TODO.md](TODO.md): other boorus and e-hentai.org album support.

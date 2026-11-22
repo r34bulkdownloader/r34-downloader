@@ -34,14 +34,6 @@ Plans after 1.0. Nothing here is promised or scheduled.
   plus new tokens such as `{album}`, `{page}` and `{album_id}`.
 
 ## Ideas
-- More themes beyond System/Light/Dark/Black, each a named palette in `theme.py`. Ideas so far:
-  - **R34**: the site's own greens
-  - **Sunset**: warm oranges and purples
-  - **Midnight**: deep navy blue
-  - **Pink**
-  - **Black & Gold**: black with gold highlights
-
-  Each theme also needs a matching selection colour and readable tag colours.
 - Sharper thumbnails at large sizes: above ~250 px, load the post's `sample_url` instead of the small preview
   (more data per thumbnail; make it a setting).
 - Tag sidecar file: optional `.txt` with the post's tags next to each download.

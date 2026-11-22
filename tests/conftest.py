@@ -26,8 +26,10 @@ def pytest_unconfigure(config):
     os._exit(getattr(config, "_r34_exitstatus", 1))  # no status recorded = something went wrong
 
 @pytest.fixture(autouse=True)
-def _isolated_data_home(tmp_path, monkeypatch):
-    # never read or write the real download history during tests
+def _isolated_data_home(tmp_path, tmp_path_factory, monkeypatch):
+    # never read or write the real settings or download history during tests (settings in their own folder,
+    # so tests that expect an empty tmp_path still get one)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("config")))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
@@ -40,6 +42,9 @@ def _no_real_searches(request, monkeypatch):
     if request.node.path.name in ("test_ui_model.py", "test_viewing.py"):
         from r34dl import api
         monkeypatch.setattr(api.ApiClient, "fetch", lambda self, *a, **k: None)
+        # Windows built without the `win` fixture still need (fake) credentials, or they open Settings and wait.
+        from r34dl import config
+        config.save({**config.DEFAULTS, "user_id": "1", "api_key": "k"})
 
 
 @pytest.fixture(autouse=True)

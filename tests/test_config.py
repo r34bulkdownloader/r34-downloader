@@ -182,3 +182,12 @@ def test_settings_whole_line_pasted_into_one_field(qapp):
     assert (d.user_edit.text(), d.key_edit.text()) == ("1112223", key)
     d.key_edit.setText("api_key=")  # half a line: the field doesn't keep "api_key="
     assert d.key_edit.text() == ""
+
+
+def test_settings_support_button_opens_kofi(qapp, monkeypatch):
+    from r34dl import dialogs
+    opened = []
+    monkeypatch.setattr(dialogs.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()))
+    d = dialogs.SettingsDialog({**config.DEFAULTS}, None)
+    [b for b in d.buttons.buttons() if "Ko-fi" in b.text()][0].click()
+    assert opened == [dialogs.KOFI_URL] and d.result() == 0  # the dialog stays open

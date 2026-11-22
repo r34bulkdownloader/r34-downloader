@@ -26,6 +26,7 @@ from .models import Post
 from .dialogs import SettingsDialog, UnlockDialog
 from .grid import ResultsModel
 from .search import FavoritesTab, SearchTab
+from .sites import Site, make_sites
 from .slideshow import Slideshow, SlideshowDialog
 from .together import TogetherTab
 from .viewer import ViewerTab
@@ -75,15 +76,18 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
         self.cfg = config.load()
         theme.apply(self.cfg["theme"])
-        self.downloaded: set[int] = config.load_history()  # shared by every search tab's model
-        self.favorites: dict[int, Post] = {}  # newest first; shared by every search tab's model
-        self._load_favorites(config.load_favorites())
-        self._url_ids: dict[str, int] = {}  # queued file url -> post id, for the history
+        self.sites: dict[str, Site] = make_sites(self)
+        self.api = self.sites["rule34.xxx"].api
+        # per site, shared by every search tab's model on that site
+        self.downloaded: dict[str, set[int]] = {s: config.load_history(s) for s in self.sites}
+        self.favorites: dict[str, dict[int, Post]] = {s: {} for s in self.sites}  # newest first
+        for s in self.sites:
+            self._load_favorites(config.load_favorites(s), s)
+        self._url_ids: dict[str, tuple[str, int]] = {}  # queued file url -> (site, post id), for the history
         self._zip_jobs: list[_ZipJob] = []
         self._zip_threads: list[threading.Thread] = []  # ZIPs being packed in the background
         self.zip_written.connect(self._on_zip_written)
         self.slideshow: Slideshow | None = None  # the running one (one at a time)
-        self.api = api.ApiClient(self)
         self.downloader = Downloader(self)
         self.nam = QNetworkAccessManager(self)
         self._build_ui()
@@ -164,7 +168,8 @@ class MainWindow(QMainWindow):
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.setCentralWidget(self.tabs)
         include = self.cfg["include"] if self.cfg["remember_include"] else ""
-        self.first = SearchTab(self, include, self.cfg["exclude"])
+        site = self.cfg["site"] if self.cfg["site"] in self.sites else "rule34.xxx"
+        self.first = SearchTab(self, include, config.site_cfg(self.cfg, site)["exclude"], site)
         self.tabs.addTab(self.first, "Search")
         self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.RightSide, None)
         self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.LeftSide, None)
@@ -182,6 +187,9 @@ class MainWindow(QMainWindow):
             sb.addWidget(w)
 
     # ---- tabs
+    def site(self, name: str) -> Site:
+        return self.sites[name]
+
     def search_tabs(self) -> list[SearchTab]:
         return [w for w in map(self.tabs.widget, range(self.tabs.count())) if isinstance(w, SearchTab)]
 
@@ -200,9 +208,14 @@ class MainWindow(QMainWindow):
             self.tabs.setTabText(i, title)
             self.tabs.setTabToolTip(i, title)
 
-    def open_search_tab(self, include: str = "", background: bool = False, focus: bool = False) -> SearchTab:
-        """New search tab; starts with the remembered exclude list. Searches right away if given tags."""
-        tab = SearchTab(self, include, self.first.exclude_edit.toPlainText())
+    def open_search_tab(self, include: str = "", background: bool = False, focus: bool = False,
+                        site: str | None = None) -> SearchTab:
+        """New search tab (on the first tab's site unless given); starts with the remembered exclude list.
+        Searches right away if given tags."""
+        site = site or self.first.site.name
+        exclude = (self.first.exclude_edit.toPlainText() if site == self.first.site.name
+                   else config.site_cfg(self.cfg, site)["exclude"])
+        tab = SearchTab(self, include, exclude, site)
         i = self.tabs.addTab(tab, tab.title())
         if not background:
             self.tabs.setCurrentIndex(i)
@@ -228,8 +241,8 @@ class MainWindow(QMainWindow):
         tab._update_nav()
         search = origin._include if origin else ""  # the post's search, even if that tab searches again later
         tab.download_requested.connect(lambda p: self.download_posts([p], search))
-        tab.is_favorite = lambda pid: pid in self.favorites
-        tab.is_followed = self.is_followed
+        tab.is_favorite = lambda pid: pid in self.favorites[post.site]  # a tab steps through one site's posts
+        tab.is_followed = lambda tag: self.is_followed(tag, post.site)
         tab.update_favorite()
         tab.favorite_toggled.connect(self.toggle_favorite)
         tab.tag_action.connect(lambda action, tag: self._tag_action(tab.origin, action, tag))
@@ -254,7 +267,7 @@ class MainWindow(QMainWindow):
         show = self.slideshow = Slideshow(ticked if only else list(tab.model.posts), self.nam, opts,
                                           origin=None if only else tab)
         search = tab._include
-        show.is_favorite = lambda pid: pid in self.favorites
+        show.is_favorite = lambda pid: pid in self.favorites[tab.site.name]
         show.favorite_toggled.connect(self.toggle_favorite)
         show.download_requested.connect(lambda p: self.download_posts([p], search))
         show.on_close = self._slideshow_closed
@@ -272,14 +285,15 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(self.tabs.addTab(tab, f"Together ({len(posts)})"))
 
     def _tag_action(self, origin: SearchTab, action: str, tag: str):
+        target = origin if origin is not None else self.first  # origin is None once its tab closed
+        site = target.site.name
         if action in ("search", "search_bg"):
-            self.open_search_tab(tag, background=action == "search_bg")
+            self.open_search_tab(tag, background=action == "search_bg", site=site)
         elif action == "follow":
-            self.follow_tag(tag)
+            self.follow_tag(tag, site)
         elif action == "unfollow":
-            self.unfollow_tag(tag)
+            self.unfollow_tag(tag, site)
         elif action in ("include", "exclude"):
-            target = origin if origin is not None else self.first  # origin is None once its tab closed
             target.add_tag(action, tag)
 
     def _close_tab(self, i: int):
@@ -328,7 +342,7 @@ class MainWindow(QMainWindow):
 
     def _store_tags(self):
         """Remember the first tab's tags (include only if the user wants it remembered)."""
-        self.cfg["exclude"] = self.first.exclude_edit.toPlainText()
+        config.site_cfg(self.cfg, self.first.site.name)["exclude"] = self.first.exclude_edit.toPlainText()
         self.cfg["include"] = self.first.include_edit.toPlainText() if self.cfg["remember_include"] else ""
 
     def search_started(self, tab: SearchTab):
@@ -350,33 +364,36 @@ class MainWindow(QMainWindow):
             for tab in self.search_tabs():
                 if isinstance(tab, FavoritesTab):
                     tab.search()  # the blacklist may have changed
-        self.downloaded.clear()  # the dialog may have cleared the history; refill the shared set in place
-        self.downloaded.update(config.load_history())
+        for site, ids in self.downloaded.items():  # the dialog may have cleared the history; refill in place
+            ids.clear()
+            ids.update(config.load_history(site))
         for tab in self.search_tabs():
             tab.view.viewport().update()
 
     # ---- followed tags
-    def is_followed(self, tag: str) -> bool:
-        return tag.lower() in {t.lower() for t in self.cfg["followed"]}
+    def is_followed(self, tag: str, site: str = "rule34.xxx") -> bool:
+        return tag.lower() in {t.lower() for t in config.site_cfg(self.cfg, site)["followed"]}
 
-    def follow_tag(self, tag: str):
+    def follow_tag(self, tag: str, site: str = "rule34.xxx"):
         tag = tag.strip().lstrip("-")
-        if tag and not self.is_followed(tag):
-            self.cfg["followed"].append(tag)
+        if tag and not self.is_followed(tag, site):
+            config.site_cfg(self.cfg, site)["followed"].append(tag)
             self._save_cfg()
             self.statusBar().showMessage(f"Following {tag} — find it under ★ Searches", 8000)
 
-    def unfollow_tag(self, tag: str):
-        keep = [t for t in self.cfg["followed"] if t.lower() != tag.lower()]
-        if len(keep) != len(self.cfg["followed"]):
-            self.cfg["followed"] = keep
+    def unfollow_tag(self, tag: str, site: str = "rule34.xxx"):
+        sc = config.site_cfg(self.cfg, site)
+        keep = [t for t in sc["followed"] if t.lower() != tag.lower()]
+        if len(keep) != len(sc["followed"]):
+            sc["followed"] = keep
             self._save_cfg()
 
     def ask_follow_tag(self):
+        site = self.current_site_search().site
         tag, ok = QInputDialog.getText(self, "Follow a tag", "Tag to follow (use _ instead of spaces):")
-        tags = api.split_tags(tag)
+        tags = site.split_tags(tag)
         if ok and len(tags) == 1:
-            self.follow_tag(tags[0])
+            self.follow_tag(tags[0], site.name)
         elif ok and tags:
             QMessageBox.information(self, "Follow a tag", "Please enter one tag. To follow a combination of tags, "
                                     "use ★ Searches → Save current search… instead.")
@@ -391,8 +408,8 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(self.tabs.addTab(tab, tab.title()))
         tab.search()
 
-    def _load_favorites(self, entries: list[dict]):
-        """Refill the shared favorites dict in place (every model holds this same object)."""
+    def _load_favorites(self, entries: list[dict], site: str):
+        """Refill the site's shared favorites dict in place (every model on that site holds this same object)."""
         posts = {}
         for d in entries:
             try:
@@ -400,23 +417,23 @@ class MainWindow(QMainWindow):
             except (KeyError, TypeError, ValueError):
                 continue  # kept in the file, just not shown
             posts.setdefault(p.id, p)
-        self.favorites.clear()
-        self.favorites.update(posts)
+        self.favorites[site].clear()
+        self.favorites[site].update(posts)
 
     def toggle_favorite(self, post: Post):
-        adding = post.id not in self.favorites
+        adding = post.id not in self.favorites[post.site]
         try:  # re-reads the file, so another window's changes are kept
             entries = config.update_favorites(add=post.to_dict() if adding else None,
-                                              remove_id=None if adding else post.id)
+                                              remove_id=None if adding else post.id, site=post.site)
         except OSError as e:
             log.error("could not save favorites: %s", e)
             QMessageBox.warning(self, "Favorites", f"Could not save favorites: {api.scrub(str(e))}")
             return
-        self._load_favorites(entries)
+        self._load_favorites(entries, post.site)
         for w in map(self.tabs.widget, range(self.tabs.count())):
             if isinstance(w, FavoritesTab):
                 w.favorite_changed(post)
-            elif isinstance(w, SearchTab):
+            elif isinstance(w, SearchTab) and w.site.name == post.site:
                 w.model.mark_changed(post.id)
             elif isinstance(w, ViewerTab):
                 w.update_favorite()
@@ -425,20 +442,22 @@ class MainWindow(QMainWindow):
     def _fill_saved_menu(self):
         m = self.saved_menu
         m.clear()
+        site = self.current_site_search().site.name
+        sc = config.site_cfg(self.cfg, site)
         m.addSection("Followed tags")
-        followed = self.cfg["followed"]
+        followed = sc["followed"]
         for tag in sorted(followed, key=str.lower):
-            m.addAction(tag.replace("&", "&&"), lambda t=tag: self.open_search_tab(t))
+            m.addAction(tag.replace("&", "&&"), lambda t=tag: self.open_search_tab(t, site=site))
         if not followed:
             m.addAction("None yet — right-click a tag in a post tab → Follow tag").setEnabled(False)
         m.addAction("Follow a tag…", self.ask_follow_tag)
         if followed:
             unfollow = m.addMenu("Unfollow")
             for tag in sorted(followed, key=str.lower):
-                unfollow.addAction(tag.replace("&", "&&"), lambda t=tag: self.unfollow_tag(t))
+                unfollow.addAction(tag.replace("&", "&&"), lambda t=tag: self.unfollow_tag(t, site))
         m.addSection("Saved searches")
         m.addAction("Save current search…", self.save_current_search)
-        saved = self.cfg["saved_searches"]
+        saved = sc["saved_searches"]
         if not saved:
             m.addAction("No saved searches yet").setEnabled(False)
             return
@@ -460,16 +479,17 @@ class MainWindow(QMainWindow):
         name = name.strip()
         if not ok or not name:
             return
-        if name in self.cfg["saved_searches"] and QMessageBox.question(
+        saved = config.site_cfg(self.cfg, tab.site.name)["saved_searches"]
+        if name in saved and QMessageBox.question(
             self, "Save search", f"Replace the saved search “{name}”?"
         ) != QMessageBox.Yes:
             return
-        self.cfg["saved_searches"][name] = {"include": include, "exclude": exclude}
+        saved[name] = {"include": include, "exclude": exclude}
         self._save_cfg()
 
     def load_saved_search(self, name: str):
-        s = self.cfg["saved_searches"][name]
         tab = self.current_site_search()
+        s = config.site_cfg(self.cfg, tab.site.name)["saved_searches"][name]
         self.tabs.setCurrentWidget(tab)
         tab.include_edit.setPlainText(s["include"])
         tab.exclude_edit.setPlainText(s["exclude"])
@@ -477,7 +497,7 @@ class MainWindow(QMainWindow):
 
     def delete_saved_search(self, name: str):
         if QMessageBox.question(self, "Delete search", f"Delete the saved search “{name}”?") == QMessageBox.Yes:
-            self.cfg["saved_searches"].pop(name, None)
+            config.site_cfg(self.cfg, self.current_site_search().site.name)["saved_searches"].pop(name, None)
             self._save_cfg()
 
     # ---- downloads
@@ -486,16 +506,19 @@ class MainWindow(QMainWindow):
         if not posts:
             return []
         base = album or expand_dir(self.cfg["save_dir"])
-        template = naming.album_template(self.cfg["template"]) if album else self.cfg["template"]
+
+        def template(p: Post) -> str:
+            t = config.site_cfg(self.cfg, p.site)["template"]
+            return naming.album_template(t) if album else t
         try:
             items = [
-                (p.file_url, naming.target_path(base, template, p, search, naming.index_text(i, len(posts))))
+                (p.file_url, naming.target_path(base, template(p), p, search, naming.index_text(i, len(posts))))
                 for i, p in enumerate(posts)
             ]
         except ValueError as e:
             QMessageBox.critical(self, "Bad filename template", api.scrub(str(e)))
             return []
-        self._url_ids.update((p.file_url, p.id) for p in posts)
+        self._url_ids.update((p.file_url, (p.site, p.id)) for p in posts)
         self.downloader.add(items)
         return [t for _, t in items]
 
@@ -585,15 +608,18 @@ class MainWindow(QMainWindow):
         self._zip_jobs.clear()
 
     def _on_item_done(self, url: str, _target: str, ok: bool):
-        post_id = self._url_ids.get(url) if ok else None
-        if post_id is None or post_id in self.downloaded:
+        site_id = self._url_ids.get(url) if ok else None
+        if site_id is None or site_id[1] in self.downloaded[site_id[0]]:
             return
+        site, post_id = site_id
         try:
-            config.add_history(post_id)
+            config.add_history(post_id, site)
         except OSError as e:  # the mark still shows this session; history just won't remember it
             log.warning("could not write download history: %s", e)
+        self.downloaded[site].add(post_id)  # also when no tab on that site is open
         for tab in self.search_tabs():
-            tab.model.mark_downloaded(post_id)
+            if tab.site.name == site:
+                tab.model.mark_downloaded(post_id)
 
     def _on_progress(self, done: int, total: int, active: int, failed: int):
         self.progress_bar.setMaximum(max(total, 1))

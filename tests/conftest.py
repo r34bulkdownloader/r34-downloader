@@ -39,8 +39,9 @@ def _isolated_data_home(tmp_path, tmp_path_factory, monkeypatch):
 def _no_real_searches(request, monkeypatch):
     # UI tests build many windows; a window left over from an earlier test can still fire a queued
     # "load more" timer later. Make sure no UI test can ever reach the real site (tests stub fetch further).
-    if request.node.path.name in ("test_ui_model.py", "test_viewing.py"):
+    if request.node.path.name in ("test_ui_model.py", "test_viewing.py", "test_sites.py"):
         from r34dl import api
+        # ApiClient.fetch, not Rule34Site.fetch: tests patch win.api.fetch to see what the site asked for
         monkeypatch.setattr(api.ApiClient, "fetch", lambda self, *a, **k: None)
         # Windows built without the `win` fixture still need (fake) credentials, or they open Settings and wait.
         from r34dl import config

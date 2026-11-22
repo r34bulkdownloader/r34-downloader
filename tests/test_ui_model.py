@@ -1054,7 +1054,7 @@ def test_favorite_from_post_tab_marks_saves_and_lists(fresh, monkeypatch):
     fresh.open_favorites()
     assert len([w for w in map(fresh.tabs.widget, range(fresh.tabs.count())) if isinstance(w, ui.FavoritesTab)]) == 1
     assert {d["id"] for d in config.load_favorites()} == {1, 2}
-    assert 2 in ui.MainWindow().favorites  # remembered next start
+    assert 2 in ui.MainWindow().favorites["rule34.xxx"]  # remembered next start
 
 
 def test_favorites_filter_locally_with_blacklist_and_ticks(fresh, monkeypatch):
@@ -1074,7 +1074,7 @@ def test_favorites_filter_locally_with_blacklist_and_ticks(fresh, monkeypatch):
     fav.include_edit.setPlainText("rating:questionable")
     fav.search()
     assert [p.id for p in fav.model.posts] == [3]
-    fresh.toggle_favorite(fresh.favorites[3])  # unfavorite: stays (without ♥) until the next Filter
+    fresh.toggle_favorite(fresh.favorites["rule34.xxx"][3])  # unfavorite: stays (without ♥) until the next Filter
     assert [p.id for p in fav.model.posts] == [3] and 3 not in fav.model.favorites
     fav.search()
     assert fav.model.posts == [] and calls == []  # never asked the site

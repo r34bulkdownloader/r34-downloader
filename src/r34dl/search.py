@@ -13,12 +13,13 @@ from PySide6.QtGui import (
 )
 from PySide6.QtNetwork import QNetworkReply
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMenu, QToolButton, QMessageBox, QPushButton, QSizePolicy,
+    QComboBox, QHBoxLayout, QLabel, QMenu, QToolButton, QMessageBox, QPushButton, QSizePolicy,
     QSpinBox, QVBoxLayout, QWidget,
 )
 
-from . import api
+from . import api, config
 from .models import Post
+from .sites import Site
 from .grid import ResultsModel, ResultsView
 from .widgets import BLACKLIST_SERVER_MAX, CELL_PAD, MAX_THUMBS, PAGE_SIZE, TagEdit, hint_label, open_in_browser, snap_thumb, wrapped
 
@@ -35,18 +36,19 @@ class SearchTab(QWidget):
 
     fetch_finished = Signal(bool)  # a page request ended (True = a page arrived, False = it failed)
 
-    def __init__(self, win: "MainWindow", include: str = "", exclude: str = ""):
+    def __init__(self, win: "MainWindow", include: str = "", exclude: str = "", site: str = "rule34.xxx"):
         super().__init__()
         self.win = win
         self.model = ResultsModel(self)
-        self.model.downloaded = win.downloaded  # shared set: one history for every tab
-        self.model.favorites = win.favorites  # shared dict: one favorites list for every tab
+        self._use_site(site)
         self.model.thumb_size = snap_thumb(win.size_slider.value())
         self._tags = ""
         self._include = ""
-        self._next_pid = 0
+        self._cursor = None  # cursor of the page asked for last (None = first page)
+        self._next_cursor = None  # infinite scroll: cursor of the next page
+        self._pages = 0  # infinite scroll: pages loaded so far
         self._inflight = False
-        self._failed_shown: tuple[int, int] | None = None
+        self._failed_shown: tuple | None = None
         self._hidden = 0  # posts left out of this search because they were already downloaded
         self._blacklisted = 0  # posts left out because of the blacklist
         self._blacklist: set[str] = set()
@@ -57,8 +59,7 @@ class SearchTab(QWidget):
         self._thumb_replies: set[QNetworkReply] = set()
         self._closed = False
         self._build_ui(include, exclude)
-        win.api.page_ready.connect(self._on_page_ready)
-        win.api.failed.connect(self._on_failed)
+        self._connect_site(True)
         self.view.verticalScrollBar().valueChanged.connect(self._maybe_load_more)
         self.model.dataChanged.connect(lambda *_: self._update_counts())
         self.model.modelReset.connect(self._update_counts)
@@ -71,20 +72,21 @@ class SearchTab(QWidget):
         side = QWidget()
         side.setFixedWidth(260)
         sv = QVBoxLayout(side)
+        self.site_box = QComboBox()
+        for name, s in win.sites.items():
+            self.site_box.addItem(s.label, name)
+        self.site_box.setCurrentIndex(self.site_box.findData(self.site.name))
+        self.site_box.currentIndexChanged.connect(lambda _: self._site_changed(self.site_box.currentData()))
+        sv.addWidget(self.site_box)
         sv.addWidget(wrapped("<b>Include tags</b> — posts must have all of these"))
-        self.include_edit = TagEdit(win.nam)
+        self.include_edit = TagEdit(win.nam, lambda: self.site)
         self.include_edit.setPlainText(include)
-        self.include_edit.setPlaceholderText("for example:\nlong_hair\nblue_eyes\nrating:questionable")
         sv.addWidget(self.include_edit, 2)
         sv.addWidget(wrapped("<b>Exclude tags</b> — hide posts with any of these"))
-        self.exclude_edit = TagEdit(win.nam)
+        self.exclude_edit = TagEdit(win.nam, lambda: self.site)
         self.exclude_edit.setPlainText(exclude)
-        self.exclude_edit.setPlaceholderText("for example:\nai_generated\n3d")
         sv.addWidget(self.exclude_edit, 1)
-        self.tags_hint = hint_label(
-            "One tag per line (spaces or commas work too). Inside a tag, use _ instead of a space: "
-            "<b>long_hair</b>. Extras: <b>rating:questionable</b> or <b>rating:explicit</b>, <b>sort:score</b>, <b>score:&gt;=50</b>. "
-            "The first tab's exclude list is remembered.")
+        self.tags_hint = hint_label("")
         sv.addWidget(self.tags_hint)
         self.search_btn = QPushButton("Search")
         self.search_btn.setToolTip("Ctrl+Enter in either box also searches")
@@ -158,20 +160,21 @@ class SearchTab(QWidget):
         self.page_jump = QSpinBox()
         self.page_jump.setRange(1, 200000)
         self.page_jump.setPrefix("Page ")
-        go = QPushButton("Go")
+        self.page_go = QPushButton("Go")
         self.prev_page_btn.clicked.connect(lambda: self.go_page(self._page - 1))
         self.next_page_btn.clicked.connect(lambda: self.go_page(self._page + 1))
-        go.clicked.connect(lambda: self.go_page(self.page_jump.value() - 1))
+        self.page_go.clicked.connect(lambda: self.go_page(self.page_jump.value() - 1))
         pb.addWidget(self.prev_page_btn)
         pb.addStretch(1)
         pb.addWidget(self.page_label)
         pb.addStretch(1)
         pb.addWidget(self.page_jump)
-        pb.addWidget(go)
+        pb.addWidget(self.page_go)
         pb.addWidget(self.next_page_btn)
         self.page_bar.hide()
         right.addWidget(self.page_bar)
         row.addLayout(right, 1)
+        self._show_site()
         self.refresh_settings_labels()
 
     def title(self) -> str:
@@ -180,17 +183,56 @@ class SearchTab(QWidget):
 
     def refresh_settings_labels(self):
         self.save_label.setText(f"Save to: {api.home_short(self.win.cfg['save_dir'])}")
-        self.template_label.setText(f"Name: {self.win.cfg['template']}")
+        self.template_label.setText(f"Name: {config.site_cfg(self.win.cfg, self.site.name)['template']}")
+
+    # ---- site
+    def _use_site(self, name: str):
+        self.site: Site = self.win.site(name)
+        self.model.downloaded = self.win.downloaded[name]  # shared set: one history per site for every tab
+        self.model.favorites = self.win.favorites[name]  # shared dict: one favorites list per site for every tab
+
+    def _connect_site(self, on: bool):
+        for sig, slot in ((self.site.page_ready, self._on_site_page), (self.site.failed, self._on_failed)):
+            if on:
+                sig.connect(slot)
+                continue
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+
+    def _show_site(self):
+        self.tags_hint.setText(self.site.tag_hint)
+        self.include_edit.setPlaceholderText(self.site.include_placeholder)
+        self.exclude_edit.setPlaceholderText(self.site.exclude_placeholder)
+        self.page_jump.setVisible(self.site.page_jump)
+        self.page_go.setVisible(self.site.page_jump)
+
+    def _site_changed(self, name: str):
+        """Picker: search this site from now on. The grid empties (its posts belong to the old site) and the
+        exclude box takes the new site's remembered list."""
+        if self is self.win.first:
+            self.win._store_tags()  # keep the old site's exclude list
+        self._connect_site(False)  # a late page from the old site must not land here
+        self._use_site(name)
+        self._connect_site(True)
+        self.win.cfg["site"] = name
+        self.exclude_edit.setPlainText(config.site_cfg(self.win.cfg, name)["exclude"])
+        self._show_site()
+        self.refresh_settings_labels()
+        self.model.generation = 0  # no search yet
+        self.model.reset()
+        self._thumb_queue.clear()
+        self._inflight = False
+        self._hidden = self._blacklisted = 0
+        self.page_bar.hide()
+        self._update_counts()
 
     def release(self):
         """Tab is closing: ignore further search results and stop its thumbnail downloads and preview."""
         self._closed = True
         self.view.preview.stop()
-        for sig, slot in ((self.win.api.page_ready, self._on_page_ready), (self.win.api.failed, self._on_failed)):
-            try:
-                sig.disconnect(slot)
-            except (RuntimeError, TypeError):
-                pass
+        self._connect_site(False)
         self._thumb_queue.clear()
         for reply in list(self._thumb_replies):
             reply.finished.disconnect()
@@ -209,14 +251,16 @@ class SearchTab(QWidget):
         self.model.reset()
         self._thumb_queue.clear()
         self._include = self.include_edit.toPlainText()
-        included = {t.lower() for t in api.split_tags(self._include)}
-        excluded = {t.lower().lstrip("-") for t in api.split_tags(self.exclude_edit.toPlainText())}
-        active = [t.lower().lstrip("-") for t in api.split_tags(self.win.cfg["blacklist"])]
+        split = self.site.split_tags
+        included = {t.lower() for t in split(self._include)}
+        excluded = {t.lower().lstrip("-") for t in split(self.exclude_edit.toPlainText())}
+        active = [t.lower().lstrip("-") for t in split(config.site_cfg(self.win.cfg, self.site.name)["blacklist"])]
         active = [t for t in dict.fromkeys(active) if t and t not in included]
         self._blacklist = set(active)
-        server_side = " ".join([t for t in active if t not in excluded][:BLACKLIST_SERVER_MAX])
-        self._tags = api.build_tags(self._include, self.exclude_edit.toPlainText() + " " + server_side)
-        self._next_pid = 0
+        server_side = [t for t in active if t not in excluded][:BLACKLIST_SERVER_MAX]
+        self._tags = self.site.build_query(self._include, self.exclude_edit.toPlainText(), server_side)
+        self._cursor = self._next_cursor = None
+        self._pages = 0
         self._inflight = False
         self._failed_shown = None
         self._hidden = 0
@@ -231,9 +275,8 @@ class SearchTab(QWidget):
         if self._inflight or self.model.exhausted:
             return
         self._inflight = True
-        cfg = self.win.cfg
-        pid = self._page if self._paged else self._next_pid
-        self.win.api.fetch(self._tags, pid, self.model.generation, cfg["user_id"], cfg["api_key"])
+        self._cursor = (self._page or None) if self._paged else self._next_cursor
+        self.site.fetch(self._tags, self._cursor, self.model.generation, self.win.cfg)
         self._update_counts()
 
     def go_page(self, page: int):
@@ -247,14 +290,25 @@ class SearchTab(QWidget):
         self.view.scrollToTop()
         self._fetch_next()
 
+    @property
+    def _next_pid(self) -> int:
+        """Old name of _pages (tests read it)."""
+        return self._pages
+
     def _on_page_ready(self, gen: int, posts: list, raw: int | None = None):
+        """A page given by its raw entry count, rule34-style (a full page means more): tests feed pages this way."""
+        full = (len(posts) if raw is None else raw) >= PAGE_SIZE
+        self._on_site_page(gen, posts, (self._cursor or 0) + 1 if full else None)
+
+    def _on_site_page(self, gen: int, posts: list, next_cursor):
         if gen != self.model.generation or self._closed:
             return
         self._inflight = False
-        page = self._page if self._paged else self._next_pid
+        page = self._page if self._paged else self._pages
         if not self._paged:
-            self._next_pid += 1
-        if (len(posts) if raw is None else raw) < PAGE_SIZE:
+            self._pages += 1
+            self._next_cursor = next_cursor
+        if next_cursor is None:
             self.model.exhausted = True
         if self._blacklist:
             kept = [p for p in posts if not self._blacklist.intersection(t.lower() for t in p.tags)]
@@ -280,7 +334,7 @@ class SearchTab(QWidget):
         self._update_counts()  # re-enable page buttons, drop "loading…"
         self.fetch_finished.emit(False)
         msg = api.scrub(msg)
-        key = (gen, self._page if self._paged else self._next_pid)
+        key = (gen, self._cursor)
         if self._failed_shown == key:
             return  # already told the user about this page; the next scroll retries silently
         self._failed_shown = key
@@ -355,7 +409,7 @@ class SearchTab(QWidget):
         m.addAction("Open in browser", lambda: open_in_browser(post))
         m.addSeparator()
         m.addAction("Download", lambda: self.win.download_posts([post], self._include))
-        m.addAction("Remove from favorites" if post.id in self.win.favorites else "Add to favorites",
+        m.addAction("Remove from favorites" if post.id in self.model.favorites else "Add to favorites",
                     lambda: self.win.toggle_favorite(post))
         return m
 
@@ -380,7 +434,7 @@ class SearchTab(QWidget):
             self.prev_page_btn.setEnabled(self._page > 0 and not self._inflight)
             self.next_page_btn.setEnabled(not self.model.exhausted and not self._inflight)
         else:
-            pages = f" · Page {self._current_page()} of {self._next_pid} loaded" if self._next_pid else ""
+            pages = f" · Page {self._current_page()} of {self._pages} loaded" if self._pages else ""
             self.count_label.setText(f"{len(self.model.posts)} loaded{pages} · {n} selected{hidden}{loading}")
         self.dl_btn.setText(f"Download {n}")
         self.together_btn.setEnabled(n >= 2)
@@ -419,15 +473,21 @@ class FavoritesTab(SearchTab):
     def can_load_more(self) -> bool:
         return False
 
+    def _site_changed(self, name: str):
+        """Picker: show that site's favorites (one site at a time)."""
+        self._use_site(name)
+        self.search()
+
     def _set_filter(self):
         """Read the boxes and the blacklist into sets (plain tags and rating:…; other meta tags only work on the
         site). A -tag in Include means exclude, as in a site search."""
         self._include = self.include_edit.toPlainText()
-        typed = [t.lower() for t in api.split_tags(self._include)]
+        typed = [t.lower() for t in self.site.split_tags(self._include)]
         need = {t for t in typed if not t.startswith("-")}
         avoid = {t.lstrip("-") for t in typed if t.startswith("-")}
-        avoid |= {t.lower().lstrip("-") for t in api.split_tags(self.exclude_edit.toPlainText())}
-        black = {t.lower().lstrip("-") for t in api.split_tags(self.win.cfg["blacklist"])} - need
+        avoid |= {t.lower().lstrip("-") for t in self.site.split_tags(self.exclude_edit.toPlainText())}
+        black = {t.lower().lstrip("-") for t in self.site.split_tags(
+            config.site_cfg(self.win.cfg, self.site.name)["blacklist"])} - need
         self._need, self._avoid, self._black = need, avoid, black
 
     @staticmethod
@@ -451,7 +511,7 @@ class FavoritesTab(SearchTab):
         self._thumb_queue.clear()
         self._set_filter()
         posts, hidden = [], 0
-        for p in self.win.favorites.values():
+        for p in self.model.favorites.values():
             if not self._matches(p):
                 continue
             if self._hits(p, self._black):
@@ -470,7 +530,9 @@ class FavoritesTab(SearchTab):
     def favorite_changed(self, post: Post):
         """Update in place (no reload, no re-downloading thumbnails, open post tabs keep their place): a new
         favorite goes to the top if it matches; an unfavorited one stays until the next Filter, without its ♥."""
-        if post.id in self.win.favorites and post.id not in self.model._rows and self.model.generation:
+        if post.site != self.site.name:
+            return  # another site's favorites list
+        if post.id in self.model.favorites and post.id not in self.model._rows and self.model.generation:
             if self._matches(post) and not self._hits(post, self._black):
                 self._thumb_queue.extend(self.model.insert_front(post))
                 self._pump_thumbs()
@@ -481,8 +543,8 @@ class FavoritesTab(SearchTab):
     def _update_counts(self):
         n = len(self.model.checked)
         hidden = f" · {self._blacklisted} hidden by blacklist" if self._blacklisted else ""
-        total = len(self.win.favorites)
-        shown = sum(p.id in self.win.favorites for p in self.model.posts)
+        total = len(self.model.favorites)
+        shown = sum(p.id in self.model.favorites for p in self.model.posts)
         what = f"{shown} of {total} favorites" if shown != total else f"{total} favorites"
         self.count_label.setText(f"{what} · {n} selected{hidden}")
         self.dl_btn.setText(f"Download {n}")

@@ -1,7 +1,9 @@
 """Shared constants, small helpers and the tag box with suggestions."""
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
     QStringListModel, Qt, QTimer, QUrl,
@@ -20,6 +22,9 @@ from PySide6.QtWidgets import QFrame, QGraphicsScene, QGraphicsView
 
 from . import api
 from .models import Post
+
+if TYPE_CHECKING:  # type hints only: sites imports this module
+    from .sites import Site
 
 log = logging.getLogger(__name__)
 
@@ -73,9 +78,10 @@ class TagEdit(QPlainTextEdit):
     DEBOUNCE_MS = 350
     _WORD = re.compile(r"[^\s,]*$")
 
-    def __init__(self, nam: QNetworkAccessManager, parent=None):
+    def __init__(self, nam: QNetworkAccessManager, site_getter: "Callable[[], Site] | None" = None, parent=None):
         super().__init__(parent)
         self._nam = nam
+        self._site = site_getter  # None = rule34.xxx's suggestions (boxes outside a search tab)
         self._reply: QNetworkReply | None = None
         self._values: dict[str, str] = {}
         self._list = QStringListModel(self)
@@ -98,17 +104,22 @@ class TagEdit(QPlainTextEdit):
             return
         if self._reply is not None:
             self._reply.abort()
-        req = api.request(api.suggest_url(word))
+        site = self._site() if self._site else None
+        req = site.suggest_request(word) if site else api.request(api.suggest_url(word))
+        if req is None:  # this site has no suggestions
+            self.completer.popup().hide()
+            return
+        parse = site.parse_suggestions if site else api.parse_suggestions
         reply = self._reply = self._nam.get(req)
-        reply.finished.connect(lambda: self._on_reply(reply, word))
+        reply.finished.connect(lambda: self._on_reply(reply, word, parse))
 
-    def _on_reply(self, reply: QNetworkReply, word: str):
+    def _on_reply(self, reply: QNetworkReply, word: str, parse: Callable[[bytes], list[tuple[str, str]]]):
         reply.deleteLater()
         if reply is self._reply:
             self._reply = None
         if reply.error() != QNetworkReply.NoError or self._word().lstrip("-") != word or not self.hasFocus():
             return
-        self.show_suggestions(api.parse_suggestions(bytes(reply.readAll())))
+        self.show_suggestions(parse(bytes(reply.readAll())))
 
     def show_suggestions(self, items: list[tuple[str, str]]):
         self._values = dict(items)

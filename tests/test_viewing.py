@@ -323,3 +323,10 @@ def test_together_resolves_ehentai_pages_but_keeps_rule34_samples(win, got):
     r = _Resolver(auto=True)
     TogetherTab([r34, page(1)], win.nam, resolve=r)
     assert got == ["https://x/s7.jpg", "https://img.test/100001.jpg"]
+
+
+def test_slideshow_pauses_on_the_image_limit(win):
+    s = slideshow.Slideshow([mk(1), mk(2)], win.nam, OPTS, resolve=lambda p, cb: cb(p, "IMAGE_LIMIT"))
+    s.go(1)
+    assert s._paused and not s._timer.isActive() and s.current().id == 1
+    assert "image limit" in s.picture.text()

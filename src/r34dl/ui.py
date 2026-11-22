@@ -1,5 +1,6 @@
 """The main window: tabs, toolbar, downloads (incl. albums/ZIPs), favorites and followed tags."""
 import logging
+import math
 import shutil
 import tempfile
 import threading
@@ -28,9 +29,10 @@ from .gallery import GalleryTab
 from .grid import ResultsModel
 from .search import FavoritesTab, SearchTab
 from .sites import Site, make_sites
+from .sites.ehclient import EH_GAP_MS, EH_WARN_PICTURES, EhDownloadFeeder
 from .slideshow import Slideshow, SlideshowDialog
 from .together import TogetherTab
-from .viewer import ViewerTab
+from .viewer import ViewerTab, resolve_error
 from .widgets import PIXMAP_CACHE_KB, THUMB_MAX, THUMB_MIN, THUMB_STEP, expand_dir, snap_thumb
 
 log = logging.getLogger(__name__)
@@ -85,11 +87,17 @@ class MainWindow(QMainWindow):
         for s in self.sites:
             self._load_favorites(config.load_favorites(s), s)
         self._url_ids: dict[str, tuple[str, int]] = {}  # queued file url -> (site, post id), for the history
+        self._target_ids: dict[str, tuple[str, int]] = {}  # same for e-hentai pages (url known only later)
         self._zip_jobs: list[_ZipJob] = []
+        self._eh_failed = 0  # e-hentai pictures that couldn't be resolved (the downloader never saw them)
+        self._last_progress = (0, 0, 0, 0)
         self._zip_threads: list[threading.Thread] = []  # ZIPs being packed in the background
         self.zip_written.connect(self._on_zip_written)
         self.slideshow: Slideshow | None = None  # the running one (one at a time)
         self.downloader = Downloader(self)
+        self.feeder = EhDownloadFeeder(self.sites["e-hentai"], self.downloader, self)
+        self.feeder.paused.connect(self._on_eh_paused)
+        self.feeder.failed.connect(self._on_eh_failed)
         self.nam = QNetworkAccessManager(self)
         self._build_ui()
         self.downloader.progress.connect(self._on_progress)
@@ -190,7 +198,10 @@ class MainWindow(QMainWindow):
         self.retry_btn.clicked.connect(self.downloader.retry_failed)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self.cancel_downloads)
-        for w in (self.progress_bar, self.progress_label, self.retry_btn, self.cancel_btn):
+        self.resume_btn = QPushButton("Resume e-hentai downloads")
+        self.resume_btn.clicked.connect(self._resume_eh)
+        self.resume_btn.hide()
+        for w in (self.progress_bar, self.progress_label, self.retry_btn, self.cancel_btn, self.resume_btn):
             sb.addWidget(w)
 
     # ---- tabs
@@ -523,30 +534,103 @@ class MainWindow(QMainWindow):
             self._save_cfg()
 
     # ---- downloads
-    def download_posts(self, posts: list[Post], search: str = "", album: Path | None = None) -> list[Path]:
-        """Queue posts; returns their target paths ([] = nothing queued). album: all into that folder, numbered."""
-        if not posts:
+    def download_posts(self, posts: list[Post], search: str = "", album: Path | None = None, queued=None) -> list[Path]:
+        """Queue posts; returns their target paths ([] = nothing queued, or not yet). album: all into that folder,
+        numbered. e-hentai galleries are listed into their pages first; queued(targets) is called once the
+        targets are known (also with [] when nothing is queued), before any of them can finish."""
+        queued = queued or (lambda targets: None)
+        if not posts or not self._confirm_eh(posts):
+            queued([])
             return []
+        if any(p.kind == "gallery" for p in posts):
+            self._expand(posts, lambda pages: self._queue_posts(pages, search, album, queued))
+            return []
+        return self._queue_posts(posts, search, album, queued)
+
+    @staticmethod
+    def _pictures(posts: list[Post]) -> int:
+        return sum(int(p.album.get("pages", 0) or 0) if p.kind == "gallery" else 1 for p in posts)
+
+    def _confirm_eh(self, posts: list[Post]) -> bool:
+        n = self._pictures([p for p in posts if p.site == "e-hentai"])  # a gallery counts its pages
+        if n <= EH_WARN_PICTURES:
+            return True
+        minutes = math.ceil(n * (2 * EH_GAP_MS) / 60000)
+        return QMessageBox.question(
+            self, "Download from e-hentai",
+            f"Download {n} pictures from e-hentai? This uses your image limit (originals use more) and takes about "
+            f"{minutes} minutes at a polite pace.") == QMessageBox.Yes
+
+    def _expand(self, posts: list[Post], cb):
+        """Galleries become their pages (listed one gallery at a time, in order); then cb(posts)."""
+        todo, out = list(posts), []
+        site = self.sites["e-hentai"]
+        sb = self.statusBar()
+
+        def step():
+            while todo and todo[0].kind != "gallery":
+                out.append(todo.pop(0))
+            if not todo:
+                if sb.currentMessage().startswith("Listing pages of"):
+                    sb.clearMessage()
+                return cb(out)
+            g = todo.pop(0)
+            sb.showMessage(f"Listing pages of {g.label}…")
+
+            def listed(pages, err):
+                out.extend(pages)
+                if err:
+                    log.warning("could not list the pages of gallery %s: %s", g.album.get("gid"), err)
+                    sb.showMessage(f"Could not list every page of {g.label}: {err}", 15000)
+                step()
+            site.list_all_pages(g, listed)
+        step()
+
+    def _queue_posts(self, posts: list[Post], search: str, album: Path | None, queued) -> list[Path]:
         base = album or expand_dir(self.cfg["save_dir"])
 
         def template(p: Post) -> str:
             t = config.site_cfg(self.cfg, p.site)["template"]
             return naming.album_template(t) if album else t
         try:
-            items = [
-                (p.file_url, naming.target_path(base, template(p), p, search, naming.index_text(i, len(posts))))
-                for i, p in enumerate(posts)
-            ]
+            targets = [naming.target_path(base, template(p), p, search, naming.index_text(i, len(posts)))
+                       for i, p in enumerate(posts)]
         except ValueError as e:
             QMessageBox.critical(self, "Bad filename template", api.scrub(str(e)))
+            targets = []
+        queued(targets)
+        if not targets:
             return []
-        self._url_ids.update((p.file_url, (p.site, p.id)) for p in posts)
-        self.downloader.add(items)
-        return [t for _, t in items]
+        plain = [(p.file_url, t) for p, t in zip(posts, targets) if p.site != "e-hentai"]
+        eh = [(p, t) for p, t in zip(posts, targets) if p.site == "e-hentai"]  # resolved one by one, paced
+        self._url_ids.update((p.file_url, (p.site, p.id)) for p in posts if p.site != "e-hentai")
+        self._target_ids.update((str(t), (p.site, p.id)) for p, t in eh)
+        if plain:
+            self.downloader.add(plain)
+        if eh:
+            self.feeder.add(eh)
+        return targets
+
+    def _on_eh_paused(self, msg: str):
+        self.statusBar().showMessage(resolve_error(msg))
+        self.resume_btn.show()
+
+    def _resume_eh(self):
+        self.resume_btn.hide()
+        self.statusBar().clearMessage()
+        self.feeder.resume()
+
+    def _on_eh_failed(self, page: str, target: str):
+        self._eh_failed += 1
+        self._album_progress(page, target, False)  # a ZIP still completes
+        self._on_progress(*self._last_progress)
 
     # ---- albums: download as one folder or one ZIP
     @staticmethod
     def album_name_suggestion(posts: list[Post], search: str) -> str:
+        titles = {str(p.album.get("title", "")) for p in posts}
+        if len(titles) == 1 and (title := naming.clean_name(titles.pop())):  # one e-hentai gallery
+            return title
         shared = set.intersection(*(set(p.tags_of("artist")) for p in posts)) if posts else set()
         if shared:
             return "+".join(sorted(shared))
@@ -557,7 +641,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Download as…", "Tick the posts you want first.")
             return
         what = "ZIP" if zipped else "folder"
-        name, ok = QInputDialog.getText(self, f"Download as {what}", f"Name for the {what} ({len(posts)} posts):",
+        name, ok = QInputDialog.getText(self, f"Download as {what}",
+                                        f"Name for the {what} ({self._pictures(posts)} posts):",
                                         text=self.album_name_suggestion(posts, search))
         if not ok:
             return
@@ -576,11 +661,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Download as ZIP", api.scrub(str(e)))
             return
         job = _ZipJob(name, parts, set())
-        self._zip_jobs.append(job)  # before queueing: an item can finish (e.g. "already there") right away
-        job.pending = {str(t) for t in self.download_posts(posts, search, album=parts)}
-        if not job.pending:
-            self._zip_jobs.remove(job)
-            shutil.rmtree(parts, ignore_errors=True)
+        self._zip_jobs.append(job)
+
+        def queued(targets):  # before queueing: an item can finish (e.g. "already there") right away
+            job.pending = {str(t) for t in targets}
+            if not job.pending and job in self._zip_jobs:
+                self._zip_jobs.remove(job)
+                shutil.rmtree(parts, ignore_errors=True)
+        self.download_posts(posts, search, album=parts, queued=queued)
 
     def _album_progress(self, url: str, target: str, ok: bool):
         for job in list(self._zip_jobs):
@@ -623,14 +711,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved {target.name}: {files} files{failed}", 15000)
 
     def cancel_downloads(self):
+        self.feeder.cancel()
+        self.resume_btn.hide()
+        self._eh_failed = 0
         self.downloader.cancel()
         for job in self._zip_jobs:
             shutil.rmtree(job.parts, ignore_errors=True)
             self.downloader.forget_failed(job.parts)
         self._zip_jobs.clear()
 
-    def _on_item_done(self, url: str, _target: str, ok: bool):
-        site_id = self._url_ids.get(url) if ok else None
+    def _on_item_done(self, url: str, target: str, ok: bool):
+        site_id = (self._url_ids.get(url) or self._target_ids.get(target)) if ok else None
         if site_id is None or site_id[1] in self.downloaded[site_id[0]]:
             return
         site, post_id = site_id
@@ -644,12 +735,14 @@ class MainWindow(QMainWindow):
                 tab.model.mark_downloaded(post_id)
 
     def _on_progress(self, done: int, total: int, active: int, failed: int):
+        self._last_progress = (done, total, active, failed)
         self.progress_bar.setMaximum(max(total, 1))
         self.progress_bar.setValue(done)
-        self.progress_label.setText(f"{done}/{total} · {active} active · {failed} failed")
+        waiting = f" · {self.feeder.waiting} e-hentai waiting" if self.feeder.waiting else ""
+        self.progress_label.setText(f"{done}/{total} · {active} active · {failed + self._eh_failed} failed{waiting}")
 
     def closeEvent(self, e):
-        if self.downloader.active:
+        if self.downloader.active or self.feeder.active:
             r = QMessageBox.question(self, "Quit", "Downloads are in progress. Cancel them and quit?")
             if r != QMessageBox.Yes:
                 e.ignore()

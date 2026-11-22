@@ -19,9 +19,11 @@ _counter = itertools.count()
 
 
 class _Item:
-    def __init__(self, url: str, target: Path):
+    def __init__(self, url: str, target: Path, headers: dict | None = None):
         self.n = next(_counter)
-        self.url = url
+        self.url = url  # as queued: item_done reports this one
+        self.fetch_url = url  # where a redirect sent us
+        self.headers = headers or {}
         self.target = target
         self.retries = 0
         self.reply: QNetworkReply | None = None
@@ -56,8 +58,9 @@ class Downloader(QObject):
         return bool(self._pending or self._running)
 
     def add(self, items):
-        for url, target in items:
-            self._pending.append(_Item(url, Path(target)))
+        """items: (url, target) or (url, target, extra request headers)."""
+        for url, target, *headers in items:
+            self._pending.append(_Item(url, Path(target), *headers))
             self._total += 1
         self._pump()
 
@@ -108,7 +111,11 @@ class Downloader(QObject):
             return
         it.written = 0
         it.error = ""
-        req = request(it.url)
+        req = request(it.fetch_url)
+        for k, v in it.headers.items():
+            req.setRawHeader(k, v)
+        if it.headers:  # Qt would send these (login cookies) on to whatever host a redirect names
+            req.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.ManualRedirectPolicy)
         reply = self._nam.get(req)
         it.reply = reply
         reply.readyRead.connect(lambda it=it: self._on_ready(it))
@@ -142,6 +149,12 @@ class Downloader(QObject):
             return
         if it.reply.bytesAvailable():
             self._on_ready(it)
+        redirect = it.reply.attribute(QNetworkRequest.RedirectionTargetAttribute)
+        if it.headers and redirect is not None and not it.error:
+            it.fetch_url, it.headers = it.reply.url().resolved(redirect).toString(), {}
+            self._close(it, remove=True)
+            self._start(it)
+            return
         err = it.error or (it.reply.errorString() if it.reply.error() != QNetworkReply.NoError else "")
         if err:
             it.error = err

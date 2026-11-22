@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from . import api
 from .models import Post
 from .sites.ehclient import CANCELLED
-from .viewer import ViewerTab, known, resolve_error
+from .viewer import IMAGE_LIMIT_TEXT, ViewerTab, known, resolve_error
 from .widgets import VIDEO_EXT, FullscreenWindow, VideoView, hint_label
 
 ERROR_MS = 1500  # a post that can't be shown stays this long (with the reason) before the show moves on
@@ -353,7 +353,10 @@ class Slideshow(FullscreenWindow):
         self._clear()
         self._message(api.scrub(text))
         self._shown = True
-        if not self._paused:
+        if text == IMAGE_LIMIT_TEXT:  # moving on would only hit the limit again
+            if not self._paused:
+                self.toggle_pause()
+        elif not self._paused:
             self._timer.start(ERROR_MS)
 
     # ---- moving on by itself

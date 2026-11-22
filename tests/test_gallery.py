@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, Signal
 from PySide6.QtGui import QColor, QImage
@@ -226,3 +228,61 @@ def test_gallery_tab_ignores_blacklist_and_hide_downloaded(win, monkeypatch):
     tab._blacklist = {"female:long hair"}
     tab._on_site_page(5, pages(g, 1, 10), None)
     assert tab.model.posts == []
+
+
+def test_gallery_menu_downloads_whole_gallery_as_zip(win, monkeypatch, tmp_path):
+    import time
+    import zipfile
+    from PySide6.QtCore import QCoreApplication
+    from r34dl import ui
+    g = gallery(pages=3)
+    win.cfg["save_dir"] = str(tmp_path)
+    tab = eh_tab(win)
+    menu = {a.text(): a for a in tab._make_post_menu(g).actions()}
+    assert {"Download gallery", "Download gallery as folder…", "Download gallery as ZIP…"} <= set(menu)
+    assert "Download" not in menu
+    site = win.sites["e-hentai"]
+    listed = []
+    monkeypatch.setattr(site, "list_all_pages", lambda gal, cb: listed.append(win.statusBar().currentMessage())
+                        or cb(pages(gal, 1, 3), None))
+
+    def resolve(post, for_download, cb):
+        if post.album["page"] == 2:
+            return cb(post, "Could not read the picture page.")
+        post.file_url = f"https://h.hath.network/{post.id}.jpg"
+        cb(post, None)
+    monkeypatch.setattr(site, "resolve", resolve)
+    added = []
+    monkeypatch.setattr(win.downloader, "add", lambda items: added.extend(items))
+    asked = []
+    monkeypatch.setattr(ui.QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: asked.append(k["text"]) or ("gal", True)))
+    menu["Download gallery as ZIP…"].trigger()
+    assert asked == ["A gallery"] and listed == ["Listing pages of A gallery…"]
+    assert len(added) == 1  # one at a time
+    for _ in range(2):
+        url, target = added[-1][:2]
+        Path(target).write_bytes(b"x")
+        win.downloader.item_done.emit(url, str(target), True)
+    assert len(added) == 2 and "1 failed" in win.progress_label.text()
+    assert {g.id + 1, g.id + 3} <= win.downloaded["e-hentai"] and not win.feeder.active
+    end = time.monotonic() + 10
+    while not (tmp_path / "gal.zip").exists() or win._zip_threads and win._zip_threads[0].is_alive():
+        QCoreApplication.processEvents()
+        assert time.monotonic() < end
+    QCoreApplication.processEvents()
+    with zipfile.ZipFile(tmp_path / "gal.zip") as z:
+        assert len(z.namelist()) == 2
+
+
+def test_image_limit_pauses_and_resume_button_continues(win, monkeypatch, tmp_path):
+    win.cfg["save_dir"] = str(tmp_path)
+    site = win.sites["e-hentai"]
+    answer = ["IMAGE_LIMIT"]
+    monkeypatch.setattr(site, "resolve", lambda post, d, cb: cb(post, answer.pop() if answer else None))
+    added = []
+    monkeypatch.setattr(win.downloader, "add", lambda items: added.extend(items))
+    win.download_posts(pages(gallery(), 1, 2))
+    assert not added and not win.resume_btn.isHidden() and "image limit" in win.statusBar().currentMessage()
+    win.resume_btn.click()
+    assert len(added) == 1 and win.resume_btn.isHidden()

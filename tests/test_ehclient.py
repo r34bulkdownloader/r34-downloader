@@ -269,3 +269,175 @@ def test_open_in_browser_uses_page_url(qapp, monkeypatch):
 def test_scrub_masks_cookies():
     s = api.scrub("ipb_pass_hash=abc; ipb_member_id=9 api_key=k")
     assert "abc" not in s and "9" not in s and "=k" not in s
+
+
+def test_view_resolve_jumps_queued_downloads(qapp):
+    site = _site({"/s/": (200, fix("picture.html"))})
+    for n in range(1, 6):
+        p = _page()
+        p.page_url = f"https://e-hentai.org/s/af53eed799/4348914-{n}"
+        site.resolve(p, True, lambda *a: None)
+    view = _page()
+    view.page_url = "https://e-hentai.org/s/af53eed799/4348914-99"
+    site.resolve(view, False, lambda *a: None)
+    spin_until(lambda: len(site.queue._nam.sent) >= 2)
+    assert site.queue._nam.sent[1][1] == view.page_url
+
+
+def test_download_resolves_again_when_logged_in_without_a_cached_original(qapp):
+    site = _site({"/s/": (200, fix("picture_original.html"))})
+    p = _page()
+    p.album.update(shown="https://x.hath.network/a.png", original="")  # seen while logged out
+    site.queue.set_login("9", "abc")
+    assert _resolve(site, p, True) is None and "/fullimg/" in p.file_url
+
+
+# ---- the download feeder
+
+class FakeDownloader(QObject):
+    item_done = Signal(str, str, bool)
+
+    def __init__(self):
+        super().__init__()
+        self.added = []
+
+    def add(self, items):
+        self.added += items
+
+    def finish(self, ok=True):
+        url, target = self.added[-1][:2]
+        Path(target).write_bytes(b"x")
+        self.item_done.emit(url, str(target), ok)
+
+
+class FakeSite:
+    def __init__(self, logged_in=False):
+        self.queue = EhQueue(nam=FakeNam({}))
+        self.queue.set_login("9", "abc") if logged_in else None
+        self.calls, self.answers = [], {}
+
+    def resolve(self, post, for_download, cb):
+        assert for_download
+        self.calls.append(post)
+        post.file_url = f"https://h.hath.network/{post.id}.jpg"
+        cb(post, self.answers.get(post.id))
+
+
+def _pages(n):
+    out = []
+    for i in range(1, n + 1):
+        p = _page()
+        p.id, p.album = 4348914 * 100000 + i, {"gid": 4348914, "page": i}
+        out.append(p)
+    return out
+
+
+def test_feeder_one_at_a_time(qapp, tmp_path):
+    site, dl = FakeSite(), FakeDownloader()
+    f = ehclient.EhDownloadFeeder(site, dl)
+    f.add([(p, tmp_path / f"{i}.jpg") for i, p in enumerate(_pages(3))])
+    assert len(site.calls) == 1 and len(dl.added) == 1
+    dl.item_done.emit("https://other/x.jpg", str(tmp_path / "other.jpg"), True)  # someone else's item
+    assert len(site.calls) == 1
+    dl.finish()
+    assert len(site.calls) == 2 and len(dl.added) == 2
+    dl.finish(ok=False)  # a failed download moves on too
+    assert len(site.calls) == 3
+    f.cancel()
+    dl.finish()
+    assert len(site.calls) == 3 and not f.active
+
+
+def test_feeder_pauses_on_509(qapp, tmp_path):
+    site, dl = FakeSite(), FakeDownloader()
+    f = ehclient.EhDownloadFeeder(site, dl)
+    pages = _pages(3)
+    site.answers[pages[1].id] = "IMAGE_LIMIT"
+    paused = []
+    f.paused.connect(paused.append)
+    f.add([(p, tmp_path / f"{i}.jpg") for i, p in enumerate(pages)])
+    dl.finish()
+    assert paused == ["IMAGE_LIMIT"] and site.calls == pages[:2] and len(dl.added) == 1
+    assert (tmp_path / "0.jpg").exists() and f.active
+    del site.answers[pages[1].id]
+    f.resume()
+    assert site.calls[2] is pages[1] and len(dl.added) == 2 and paused == ["IMAGE_LIMIT"]
+
+
+def test_feeder_failed_resolve_reports_and_moves_on(qapp, tmp_path):
+    site, dl = FakeSite(), FakeDownloader()
+    f = ehclient.EhDownloadFeeder(site, dl)
+    pages = _pages(2)
+    site.answers[pages[0].id] = "Could not read the picture page."
+    site.answers[pages[1].id] = ehclient.CANCELLED
+    bad = []
+    f.failed.connect(lambda page, target: bad.append((page, target)))
+    f.add([(pages[0], tmp_path / "0.jpg")])
+    assert bad == [(pages[0].page_url, str(tmp_path / "0.jpg"))] and not f.active
+
+
+def test_feeder_original_has_cookie(qapp, tmp_path):
+    for logged_in in (True, False):
+        site, dl = _site({"/s/": (200, fix("picture_original.html"))}), FakeDownloader()
+        if logged_in:
+            site.queue.set_login("9", "abc")
+        f = ehclient.EhDownloadFeeder(site, dl)
+        p = _page()
+        f.add([(p, tmp_path / "a.png")])
+        spin_until(lambda: dl.added)
+        item = dl.added[0]
+        if logged_in:
+            assert "/fullimg/" in item[0] and item[2] == {b"Cookie": b"ipb_member_id=9; ipb_pass_hash=abc; nw=1"}
+        else:
+            assert item == (p.album["shown"], tmp_path / "a.png") and "hath.network" in item[0]
+
+
+def test_large_batch_asks(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from r34dl import config
+    from r34dl.ui import MainWindow
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.save({**config.DEFAULTS, "user_id": "1", "api_key": "k"})
+    win = MainWindow()
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    win.download_posts(_pages(201))
+    assert len(asked) == 1 and asked[0].startswith("Download 201 pictures from e-hentai?")
+    assert "about 7 minutes" in asked[0]
+    assert not win.feeder.active and not win.downloader.active
+    gal = _page()
+    gal.kind, gal.album = "gallery", {"gid": 1, "token": "t", "title": "T", "pages": 300}
+    win.download_posts([gal])  # asked from the gallery's page count, before listing
+    assert len(asked) == 2 and "300 pictures" in asked[1] and not win.feeder.active
+    win.download_posts(_pages(200))  # not more than EH_WARN_PICTURES: no question
+    assert len(asked) == 2 and win.feeder.active
+    win.cancel_downloads()
+    assert not win.feeder.active
+
+
+def test_list_all_pages_walks_until_no_next_p(qapp):
+    site = EhentaiSite()
+    asked = []
+
+    def fake_fetch(gallery, p, gen):
+        asked.append(p)
+        site.page_ready.emit(gen + 1000, _pages(1), None)  # someone else's generation: ignored
+        nxt = (p or 0) + 1
+        QTimer.singleShot(1, lambda: site.page_ready.emit(gen, _pages(2)[nxt - 1:nxt], nxt if nxt < 2 else None))
+    site.fetch_gallery = fake_fetch
+    out = []
+    site.list_all_pages(_page(), lambda pages, err: out.append(([p.album["page"] for p in pages], err)))
+    spin_until(lambda: out)
+    assert out == [([1, 2], None)] and asked == [None, 1]
+    site.page_ready.emit(-1, _pages(1), None)  # disconnected once done: no second answer
+    assert len(out) == 1
+
+
+def test_list_all_pages_reports_failure_with_what_it_has(qapp):
+    from r34dl.sites.ehentai import parse_gdata
+    gallery = [g for g in parse_gdata(fix("gdata.json")) if g.album["gid"] == 4348914][0]
+    site = _site({"/g/": [(200, fix("gallery.html")), (200, fix("warning.html"))]})
+    out = []
+    site.list_all_pages(gallery, lambda pages, err: out.append((pages, err)))
+    spin_until(lambda: out)
+    assert len(out[0][0]) == 20 and out[0][1] == ehclient.WARNING_MSG

@@ -446,7 +446,12 @@ class SearchTab(QWidget):
         m.addAction("Open in background tab", lambda: self._open(post, True))
         m.addAction("Open in browser", lambda: open_in_browser(post))
         m.addSeparator()
-        m.addAction("Download", lambda: self.win.download_posts([post], self._include))
+        if post.kind == "gallery":
+            m.addAction("Download gallery", lambda: self.win.download_posts([post], self._include))
+            m.addAction("Download gallery as folder…", lambda: self.win.download_album([post], self._include, False))
+            m.addAction("Download gallery as ZIP…", lambda: self.win.download_album([post], self._include, True))
+        else:
+            m.addAction("Download", lambda: self.win.download_posts([post], self._include))
         m.addAction("Remove from favorites" if post.id in self.model.favorites else "Add to favorites",
                     lambda: self.win.toggle_favorite(post))
         return m

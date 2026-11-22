@@ -1,10 +1,11 @@
 """e-hentai.org over QtNetwork: a paced request queue (EhQueue) and the Site the search tabs talk to."""
+import itertools
 import logging
 import re
 import time
 from collections import deque
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from .. import api
@@ -15,9 +16,11 @@ from . import ehentai as eh
 EH_GAP_MS = 1000
 EH_BURST_PAUSE_MS = 5000
 EH_BURST = 4
+EH_WARN_PICTURES = 200  # a bigger download batch asks first
 CANCELLED = "cancelled"  # error given to jobs dropped by clear()
 WARNING_MSG = "This gallery is behind a content warning that the app couldn't skip."
 _ORIGINS = ("https://e-hentai.org/", "https://api.e-hentai.org/")
+_list_gens = itertools.count(-1, -1)  # list_all_pages' generations: search tabs use positive ones
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +34,7 @@ class EhQueue(QObject):
         self._nam = nam or QNetworkAccessManager(self)
         self.gap_ms, self.burst_pause_ms, self.retry_delays_ms = EH_GAP_MS, EH_BURST_PAUSE_MS, api.RETRY_DELAYS_MS
         self._jobs: deque = deque()  # (url, body or None, cb, attempt)
+        self._low: deque = deque()  # download jobs: sent only when nothing else waits (viewing comes first)
         self._busy = False
         self._sent = 0
         self._next_at = 0.0  # monotonic seconds before which nothing is sent
@@ -44,7 +48,10 @@ class EhQueue(QObject):
         self.logged_in = ok
         self._cookie = f"ipb_member_id={member_id}; ipb_pass_hash={pass_hash}; nw=1".encode() if ok else b"nw=1"
 
-    def get(self, url: str, cb) -> None:
+    def get(self, url: str, cb, low: bool = False) -> None:
+        if low:
+            self._low.append((url, None, cb, 0))
+            return self._pump()
         self._add((url, None, cb, 0))
 
     def post(self, url: str, body: bytes, cb) -> None:
@@ -52,7 +59,7 @@ class EhQueue(QObject):
 
     def clear(self) -> None:
         """Drop pending jobs; each callback still fires once, with CANCELLED."""
-        jobs, self._jobs = list(self._jobs), deque()
+        jobs, self._jobs, self._low = list(self._jobs) + list(self._low), deque(), deque()
         for _url, _body, cb, _attempt in jobs:
             cb(None, b"", CANCELLED)
 
@@ -61,13 +68,13 @@ class EhQueue(QObject):
         self._pump()
 
     def _pump(self) -> None:
-        if self._busy or not self._jobs:
+        if self._busy or not (self._jobs or self._low):
             return
         wait_ms = (self._next_at - time.monotonic()) * 1000
         if wait_ms > 0:
             self._timer.start(int(wait_ms) + 1)
             return
-        url, body, cb, attempt = job = self._jobs.popleft()
+        url, body, cb, attempt = job = (self._jobs or self._low).popleft()
         self._busy = True
         self._sent += 1
         gap = self.burst_pause_ms if self._sent % EH_BURST == 0 else self.gap_ms
@@ -186,7 +193,8 @@ class EhentaiSite(Site):
             return super().resolve(post, for_download, cb)
         if not post.page_url.startswith(eh.EH + "/s/"):
             return cb(post, "This picture's page is not an e-hentai.org link.")
-        if "shown" in post.album:
+        # a copy seen while logged out has no original: a logged-in download asks again
+        if "shown" in post.album and not (for_download and self.queue.logged_in and not post.album.get("original")):
             return self._pick(post, for_download, cb)
 
         def on_page(status, body, err):
@@ -201,7 +209,32 @@ class EhentaiSite(Site):
             post.album["shown"] = shown
             post.album["original"] = original if original and eh.safe_image_url(original) else ""
             self._pick(post, for_download, cb)
-        self.queue.get(post.page_url, on_page)
+        self.queue.get(post.page_url, on_page, low=for_download)
+
+    def list_all_pages(self, gallery: Post, cb) -> None:
+        """Every page post of the gallery, walking fetch_gallery until there is no next p; then
+        cb(pages, error or None). On an error, pages holds what was listed before it."""
+        gen, got = next(_list_gens), []
+
+        def ready(g, pages, nxt):
+            if g != gen:
+                return
+            got.extend(pages)
+            if nxt is None:
+                return done(None)
+            self.fetch_gallery(gallery, nxt, gen)
+
+        def bad(g, msg):
+            if g == gen:
+                done(msg)
+
+        def done(err):
+            self.page_ready.disconnect(ready)
+            self.failed.disconnect(bad)
+            cb(got, err)
+        self.page_ready.connect(ready)
+        self.failed.connect(bad)
+        self.fetch_gallery(gallery, None, gen)
 
     def _pick(self, post: Post, for_download: bool, cb) -> None:
         original, shown = post.album.get("original"), post.album.get("shown")
@@ -210,3 +243,74 @@ class EhentaiSite(Site):
             return cb(post, "The picture's address was refused.")
         post.file_url = url
         cb(post, None)
+
+
+class EhDownloadFeeder(QObject):
+    """Hands e-hentai pages to the downloader one at a time: resolve (paced by the site queue), download, and
+    only after that item_done the next. Originals get the login cookie; resized H@H copies never do."""
+
+    paused = Signal(str)  # "IMAGE_LIMIT": stopped, the rest is kept until resume()
+    failed = Signal(str, str)  # picture page, target: it couldn't be resolved (so ZIP jobs still complete)
+
+    def __init__(self, site: EhentaiSite, downloader, parent=None):
+        super().__init__(parent)
+        self.site, self.downloader = site, downloader
+        self._jobs: deque = deque()  # (post, target path)
+        self._busy: str | bool = False  # True: resolving; a target text: downloading it
+        self._paused = False
+        self._gen = 0
+        downloader.item_done.connect(self._on_item_done)
+
+    @property
+    def active(self) -> bool:
+        return bool(self._jobs or self._busy)
+
+    @property
+    def waiting(self) -> int:
+        return len(self._jobs) - (self._busy is True)
+
+    def add(self, jobs) -> None:
+        self._jobs.extend(jobs)
+        self._next()
+
+    def resume(self) -> None:
+        self._paused = False
+        self._next()
+
+    def cancel(self) -> None:
+        # shortcut: a resolve already in the site queue is still sent once and its answer ignored
+        self._gen += 1
+        self._jobs.clear()
+        self._busy = self._paused = False
+
+    def _next(self) -> None:
+        if self._busy or self._paused or not self._jobs:
+            return
+        post, target = self._jobs[0]
+        self._busy, gen = True, self._gen
+        self.site.resolve(post, True, lambda p, err: self._resolved(p, target, err, gen))
+
+    def _resolved(self, post: Post, target, err, gen: int) -> None:
+        if gen != self._gen:
+            return
+        self._busy = False
+        if err == CANCELLED:  # someone cleared the site queue: silent, ask again
+            return self._next()
+        if err == "IMAGE_LIMIT":
+            self._paused = True
+            return self.paused.emit(err)
+        self._jobs.popleft()
+        if err:
+            log.warning("e-hentai picture not downloaded: %s", api.scrub(err))
+            self.failed.emit(post.page_url, str(target))
+            return self._next()
+        q = self.site.queue
+        original = q.logged_in and post.file_url == post.album.get("original")
+        self._busy = str(target)
+        self.downloader.add([(post.file_url, target, {b"Cookie": q._cookie})] if original else
+                            [(post.file_url, target)])
+
+    def _on_item_done(self, url: str, target: str, ok: bool) -> None:
+        if self._busy and target == self._busy:
+            self._busy = False
+            self._next()

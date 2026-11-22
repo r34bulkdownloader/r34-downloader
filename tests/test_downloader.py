@@ -30,8 +30,14 @@ def server():
             with st.lock:
                 st.open += 1
                 st.max_open = max(st.max_open, st.open)
+                st.cookies = getattr(st, "cookies", []) + [(self.path, self.headers.get("Cookie"))]
             try:
-                if self.path == "/ok" or (self.path == "/500" and not st.fail_500):
+                if self.path == "/redir":
+                    self.send_response(302)
+                    self.send_header("Location", "/ok")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                elif self.path == "/ok" or (self.path == "/500" and not st.fail_500):
                     self.send_response(200)
                     self.send_header("Content-Length", "100")
                     self.end_headers()
@@ -174,3 +180,20 @@ def test_missing_file_is_not_retried(qapp, server, tmp_path):
     d.add([(server.url + "/404", tmp_path / "a.jpg")])
     run_until_finished(d)
     assert server.hits_404 == 1 and last[-1][3] == 1
+
+
+def test_downloader_extra_headers(qapp, server, tmp_path):
+    d = Downloader()
+    d.add([(server.url + "/ok", tmp_path / "a.jpg", {b"Cookie": b"nw=1"}), (server.url + "/ok", tmp_path / "b.jpg")])
+    run_until_finished(d)
+    assert sorted(server.cookies, key=str) == [("/ok", "nw=1"), ("/ok", None)]
+
+
+def test_extra_headers_are_not_sent_on_after_a_redirect(qapp, server, tmp_path):
+    d = Downloader()
+    saved = []
+    d.item_done.connect(lambda url, target, ok: saved.append((url, ok)))
+    d.add([(server.url + "/redir", tmp_path / "a.jpg", {b"Cookie": b"secret=1"})])
+    run_until_finished(d)
+    assert server.cookies == [("/redir", "secret=1"), ("/ok", None)]
+    assert (tmp_path / "a.jpg").stat().st_size == 100 and saved == [(server.url + "/redir", True)]

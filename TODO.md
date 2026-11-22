@@ -34,6 +34,14 @@ Plans after 1.0. Nothing here is promised or scheduled.
   plus new tokens such as `{album}`, `{page}` and `{album_id}`.
 
 ## Ideas
+- **Export and import favorites and settings:** one file you can back up or move to another computer.
+  - Includes favorites, saved searches, followed tags, the blacklist and preferences.
+  - Leaves out the User ID and API key unless you tick "include my login". The download history can be included
+    or left out.
+  - On import, choose whether to merge with what's there or replace it.
+- **Bulk download favorites:** a "Download all" button in the Favorites tab that downloads every favorite (or
+  every one matching the filter) in one click, as files, a folder or a ZIP. Already-downloaded favorites are
+  skipped unless you choose otherwise. (Today it takes Favorites → All → Download.)
 - Sharper thumbnails at large sizes: above ~250 px, load the post's `sample_url` instead of the small preview
   (more data per thumbnail; make it a setting).
 - Tag sidecar file: optional `.txt` with the post's tags next to each download.

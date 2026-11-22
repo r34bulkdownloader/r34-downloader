@@ -136,15 +136,39 @@ def test_queue_rejects_offsite_redirect(qapp):
 def test_queue_clear_drops_pending(qapp):
     nam = FakeNam({"e-hentai.org": (200, b"ok")})
     q = fast(EhQueue(nam=nam))
-    got = []
+    first, got = [], []
+    q.get("https://e-hentai.org/busy", lambda s, b, e: first.append(s))  # in flight, not dropped
     for i in range(3):
-        q.get(f"https://e-hentai.org/{i}", lambda s, b, e: got.append(s))
+        q.get(f"https://e-hentai.org/{i}", lambda s, b, e, i=i: got.append((i, s, e)))
     q.clear()
-    spin_until(lambda: got)
+    assert got == [(i, None, ehclient.CANCELLED) for i in range(3)]  # each fires once, right away
+    spin_until(lambda: first)
     loop = QEventLoop()
     QTimer.singleShot(200, loop.quit)
     loop.exec()
-    assert len(nam.sent) == 1 and got == [200]
+    assert len(nam.sent) == 1 and first == [200] and len(got) == 3
+
+
+def test_resolve_cancelled_by_clear(qapp):
+    site = _site({"e-hentai.org": (200, b"ok")})
+    site.queue.get("https://e-hentai.org/busy", lambda *a: None)
+    out = []
+    site.resolve(_page(), False, lambda p, err: out.append(err))
+    site.queue.clear()
+    assert out == [ehclient.CANCELLED]
+
+
+def test_cancelled_search_is_silent_and_bad_gdata_fails(qapp):
+    site = _site({"busy": (200, b""), "api.e-hentai.org": (200, b'{"gmetadata": 5}'), "f_search": (200, fix("search.html"))})
+    got, bad = [], []
+    site.page_ready.connect(lambda *a: got.append(a))
+    site.failed.connect(lambda g, m: bad.append((g, m)))
+    site.queue.get("https://e-hentai.org/busy", lambda *a: None)
+    site.fetch("x", None, 1, {})
+    site.queue.clear()  # generation 1 is stale: no page_ready, no failed
+    site.fetch("x", None, 2, {})
+    spin_until(lambda: bad)
+    assert not got and [g for g, _ in bad] == [2]
 
 
 def _site(routes):

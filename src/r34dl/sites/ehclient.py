@@ -15,6 +15,7 @@ from . import ehentai as eh
 EH_GAP_MS = 1000
 EH_BURST_PAUSE_MS = 5000
 EH_BURST = 4
+CANCELLED = "cancelled"  # error given to jobs dropped by clear()
 WARNING_MSG = "This gallery is behind a content warning that the app couldn't skip."
 _ORIGINS = ("https://e-hentai.org/", "https://api.e-hentai.org/")
 
@@ -50,7 +51,10 @@ class EhQueue(QObject):
         self._add((url, body, cb, 0))
 
     def clear(self) -> None:
-        self._jobs.clear()
+        """Drop pending jobs; each callback still fires once, with CANCELLED."""
+        jobs, self._jobs = list(self._jobs), deque()
+        for _url, _body, cb, _attempt in jobs:
+            cb(None, b"", CANCELLED)
 
     def _add(self, job, front=False) -> None:
         self._jobs.appendleft(job) if front else self._jobs.append(job)
@@ -131,7 +135,7 @@ class EhentaiSite(Site):
 
         def on_search(status, body, err):
             if err:
-                return self.failed.emit(generation, err)
+                return None if err == CANCELLED else self.failed.emit(generation, err)
             pairs, nxt = eh.parse_search(body.decode("utf-8", "replace"))
             self._gdata(pairs, [], generation, nxt)
         self.queue.get(eh.search_url(query, cursor), on_search)
@@ -143,10 +147,10 @@ class EhentaiSite(Site):
 
         def on_gdata(status, body, err):
             if err:
-                return self.failed.emit(gen, err)
+                return None if err == CANCELLED else self.failed.emit(gen, err)  # cancelled = stale generation
             try:
                 posts = eh.parse_gdata(body)
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, TypeError):
                 return self.failed.emit(gen, "Could not read e-hentai's gallery data.")
             for p in posts:
                 if not eh.safe_image_url(p.preview_url):
@@ -157,7 +161,7 @@ class EhentaiSite(Site):
     def fetch_gallery(self, gallery: Post, p: int | None, gen: int) -> None:
         def on_page(status, body, err):
             if err:
-                return self.failed.emit(gen, err)
+                return None if err == CANCELLED else self.failed.emit(gen, err)  # cancelled = stale generation
             try:
                 pages, nxt = eh.parse_gallery(body.decode("utf-8", "replace"), gallery)
             except eh.GalleryWarning:

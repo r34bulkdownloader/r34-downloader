@@ -1,0 +1,187 @@
+import pytest
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, Signal
+from PySide6.QtGui import QColor, QImage
+from PySide6.QtNetwork import QNetworkReply
+from PySide6.QtWidgets import QMessageBox
+
+from r34dl.models import Post
+
+SPRITE = "https://ehgt.org/m/001/1-00.jpg"
+
+
+@pytest.fixture
+def win(qapp, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from r34dl import config
+    from r34dl.ui import MainWindow
+    config.save({**config.DEFAULTS, "user_id": "1", "api_key": "k"})
+    w = MainWindow()
+    w.first._inflight = True
+    w.got = []  # thumbnail requests
+    monkeypatch.setattr(w.nam, "get", lambda req: w.got.append(FakeReply(req.url().toString())) or w.got[-1])
+    return w
+
+
+class FakeReply(QObject):
+    finished = Signal()
+
+    def __init__(self, url, data=b""):
+        super().__init__()
+        self.url, self.data = url, data
+
+    def error(self):
+        return QNetworkReply.NoError
+
+    def readAll(self):
+        return QByteArray(self.data)
+
+    def errorString(self):
+        return ""
+
+    def abort(self):
+        pass
+
+
+def png(w, h, left=QColor(255, 0, 0), right=QColor(0, 0, 255)) -> bytes:
+    img = QImage(w, h, QImage.Format_RGB32)
+    img.fill(left)
+    for x in range(w // 2, w):
+        for y in range(h):
+            img.setPixelColor(x, y, right)
+    buf = QBuffer()
+    buf.open(QIODevice.WriteOnly)
+    img.save(buf, "PNG")
+    return bytes(buf.data())
+
+
+def gallery(gid=7, pages=40) -> Post:
+    album = {"gid": gid, "token": "0123456789", "title": "A gallery", "pages": pages, "category": "Doujinshi"}
+    return Post(gid * 100000, "", "", "https://ehgt.org/t/cover.jpg", "", ["female:long hair"], "doujinshi", 0, 0, 0,
+                {"female:long hair": ("general", 0)}, site="e-hentai", kind="gallery",
+                page_url=f"https://e-hentai.org/g/{gid}/0123456789/", album=album)
+
+
+def pages(g: Post, start: int, n: int, url=SPRITE) -> list[Post]:
+    return [Post(g.id + i, "", "", url, "", list(g.tags), g.rating, 0, 0, 0, site="e-hentai", kind="page",
+                 page_url=f"https://e-hentai.org/s/abc/{g.album['gid']}-{i}",
+                 album={**g.album, "page": i, "sprite": (100 * ((i - 1) % 2), 0, 100, 100)})
+            for i in range(start, start + n)]
+
+
+def eh_tab(win):
+    tab = win.open_search_tab(site="e-hentai")
+    tab.model.generation = 5
+    return tab
+
+
+def test_gallery_click_opens_gallery_tab(win, monkeypatch):
+    from r34dl.gallery import GalleryTab
+    site = win.sites["e-hentai"]
+    asked = []
+    monkeypatch.setattr(site, "fetch_gallery", lambda g, p, gen: asked.append((g, p)))
+    tab = eh_tab(win)
+    g = gallery()
+    tab._on_site_page(5, [g], None)
+    tab.view.resize(400, 400)
+    tab.view.grab()  # draws the gallery cell ("40 p" badge, title strip) without errors
+    tab._on_post_clicked(0, False)
+    gt = win.tabs.currentWidget()
+    assert isinstance(gt, GalleryTab) and gt.gallery is g
+    assert asked == [(g, None)]
+    assert gt.site_box.isHidden() and gt.include_edit.isHidden() and gt.exclude_edit.isHidden()
+
+
+def test_gallery_tab_lists_pages(win, monkeypatch):
+    site = win.sites["e-hentai"]
+    g = gallery()
+    monkeypatch.setattr(site, "fetch_gallery", lambda gal, p, gen: site.page_ready.emit(gen, pages(gal, 1, 40), None))
+    gt = win.open_gallery(g, False)
+    assert len(gt.model.posts) == 40
+    assert gt.title() == g.label and win.tabs.tabText(win.tabs.indexOf(gt)) == g.label
+    assert "Doujinshi" in gt.info_label.text() and "40" in gt.info_label.text()
+    assert gt.tag_list.tags() == ["female:long hair"]
+
+
+def test_crop_sprite():
+    from r34dl.gallery import crop_sprite
+    out = QImage.fromData(crop_sprite(png(200, 100), (100, 0, 100, 100)))
+    assert (out.width(), out.height()) == (100, 100)
+    assert out.pixelColor(50, 50) == QColor(0, 0, 255)  # the right half
+    assert crop_sprite(b"not an image", (0, 0, 1, 1)) == b""
+
+
+def test_sprite_fetched_once(win):
+    tab = eh_tab(win)
+    g = gallery()
+    tab._on_site_page(5, pages(g, 1, 20), None)
+    assert [r.url for r in win.got] == [SPRITE]
+    reply = win.got[0]
+    reply.data = png(200, 100)
+    reply.finished.emit()
+    assert len(tab.model.thumbs) == 20
+    assert QImage.fromData(tab.model.thumbs[g.id + 2]).pixelColor(50, 50) == QColor(0, 0, 255)
+
+
+def test_hover_preview_off_for_ehentai(win):
+    win.cfg["hover_preview"] = True
+    assert win.first.view.preview.enabled()
+    assert not eh_tab(win).view.preview.enabled()
+
+
+def test_gallery_paged_previous_next(win, monkeypatch):
+    site = win.sites["e-hentai"]
+    asked = []
+
+    def fetch(gal, p, gen):
+        asked.append(p)
+        start = 1 + 20 * (p or 0)
+        site.page_ready.emit(gen, pages(gal, start, 20), None if p == 1 else (p or 0) + 1)
+    monkeypatch.setattr(site, "fetch_gallery", fetch)
+    win.cfg["infinite_scroll"] = False
+    gt = win.open_gallery(gallery(), False)
+    assert gt.page_jump.isHidden() and gt.page_go.isHidden()
+    assert gt.next_page_btn.isEnabled() and not gt.prev_page_btn.isEnabled()
+    gt.next_page_btn.click()
+    assert not gt.next_page_btn.isEnabled() and gt.prev_page_btn.isEnabled()
+    assert gt.model.posts[0].album["page"] == 21
+    gt.prev_page_btn.click()
+    assert asked == [None, 1, None]
+    assert gt.model.posts[0].album["page"] == 1
+
+
+def test_ehentai_search_paged_uses_cursors(win, monkeypatch):
+    site = win.sites["e-hentai"]
+    asked = []
+    monkeypatch.setattr(site, "fetch", lambda q, cursor, gen, cfg: (asked.append(cursor),
+                        site.page_ready.emit(gen, [gallery(len(asked))], f"c{len(asked)}")))
+    win.cfg["infinite_scroll"] = False
+    tab = win.open_search_tab(site="e-hentai")
+    tab.include_edit.setPlainText("x")
+    tab.search()
+    tab.next_page_btn.click()
+    tab.next_page_btn.click()
+    tab.prev_page_btn.click()
+    assert asked == [None, "c1", "c2", "c1"]
+
+
+def test_gallery_tab_release(win, monkeypatch):
+    site = win.sites["e-hentai"]
+    monkeypatch.setattr(site, "fetch_gallery", lambda *a: None)
+    gt = win.open_gallery(gallery(), True)
+    gen = gt.model.generation
+    win._close_tab(win.tabs.indexOf(gt))
+    site.page_ready.emit(gen, pages(gallery(), 1, 3), None)  # must not reach the closed tab
+    assert gt.model.posts == []
+
+
+def test_site_switch_with_ticks_asks(win, monkeypatch):
+    tab = win.open_search_tab()
+    tab.model.generation = 3
+    tab._on_page_ready(3, [Post(1, "h", "https://x/1.jpg", "", "", [], "s", 0, 0, 0)])
+    tab.model.toggle(0)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.No)
+    tab.site_box.setCurrentIndex(tab.site_box.findData("e-hentai"))
+    assert tab.site.name == "rule34.xxx" and tab.site_box.currentData() == "rule34.xxx" and tab.model.checked
+    monkeypatch.setattr(QMessageBox, "question", lambda *a: QMessageBox.Yes)
+    tab.site_box.setCurrentIndex(tab.site_box.findData("e-hentai"))
+    assert tab.site.name == "e-hentai" and not tab.model.checked

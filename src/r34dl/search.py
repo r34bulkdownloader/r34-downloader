@@ -57,6 +57,8 @@ class SearchTab(QWidget):
         self._thumb_queue: deque[Post] = deque()
         self._thumb_active = 0
         self._thumb_replies: set[QNetworkReply] = set()
+        self._thumb_waiting: dict[tuple, list[Post]] = {}  # (generation, url) -> posts sharing that thumbnail
+        self._page_cursors: list = [None]  # page mode on a site without page jump: cursor of each page seen
         self._closed = False
         self._build_ui(include, exclude)
         self._connect_site(True)
@@ -71,24 +73,28 @@ class SearchTab(QWidget):
         row = QHBoxLayout(self)
         side = QWidget()
         side.setFixedWidth(260)
-        sv = QVBoxLayout(side)
+        sv = self.side_layout = QVBoxLayout(side)
         self.site_box = QComboBox()
         for name, s in win.sites.items():
             self.site_box.addItem(s.label, name)
         self.site_box.setCurrentIndex(self.site_box.findData(self.site.name))
         self.site_box.currentIndexChanged.connect(lambda _: self._site_changed(self.site_box.currentData()))
         sv.addWidget(self.site_box)
-        sv.addWidget(wrapped("<b>Include tags</b> — posts must have all of these"))
+        include_label = wrapped("<b>Include tags</b> — posts must have all of these")
+        sv.addWidget(include_label)
         self.include_edit = TagEdit(win.nam, lambda: self.site)
         self.include_edit.setPlainText(include)
         sv.addWidget(self.include_edit, 2)
-        sv.addWidget(wrapped("<b>Exclude tags</b> — hide posts with any of these"))
+        exclude_label = wrapped("<b>Exclude tags</b> — hide posts with any of these")
+        sv.addWidget(exclude_label)
         self.exclude_edit = TagEdit(win.nam, lambda: self.site)
         self.exclude_edit.setPlainText(exclude)
         sv.addWidget(self.exclude_edit, 1)
         self.tags_hint = hint_label("")
         sv.addWidget(self.tags_hint)
         self.search_btn = QPushButton("Search")
+        self.tag_widgets = [include_label, self.include_edit, exclude_label, self.exclude_edit, self.tags_hint,
+                            self.search_btn]
         self.search_btn.setToolTip("Ctrl+Enter in either box also searches")
         self.search_btn.clicked.connect(self.search)
         sv.addWidget(self.search_btn)
@@ -145,7 +151,8 @@ class SearchTab(QWidget):
         self.view = ResultsView()
         self.view.setModel(self.model)
         self.view.preview.nam = win.nam
-        self.view.preview.enabled = lambda: self.win.cfg["hover_preview"]
+        # e-hentai posts have no file address until opened, so nothing to preview
+        self.view.preview.enabled = lambda: self.win.cfg["hover_preview"] and self.site.name != "e-hentai"
         self.view.set_thumb_size(self.model.thumb_size)
         self.view.post_clicked.connect(self._on_post_clicked)
         self.view.context_requested.connect(self._post_menu)
@@ -211,6 +218,12 @@ class SearchTab(QWidget):
     def _site_changed(self, name: str):
         """Picker: search this site from now on. The grid empties (its posts belong to the old site) and the
         exclude box takes the new site's remembered list."""
+        if self.model.checked and QMessageBox.question(
+                self, "Change site", "Discard the current selection?") != QMessageBox.Yes:
+            self.site_box.blockSignals(True)
+            self.site_box.setCurrentIndex(self.site_box.findData(self.site.name))
+            self.site_box.blockSignals(False)
+            return
         if self is self.win.first:
             self.win._store_tags()  # keep the old site's exclude list
         self._connect_site(False)  # a late page from the old site must not land here
@@ -239,6 +252,7 @@ class SearchTab(QWidget):
             reply.abort()
             reply.deleteLater()
         self._thumb_replies.clear()
+        self._thumb_waiting.clear()
 
     # ---- search / paging
     def search(self):
@@ -267,6 +281,7 @@ class SearchTab(QWidget):
         self._blacklisted = 0
         self._paged = not self.win.cfg["infinite_scroll"]
         self._page = 0
+        self._page_cursors = [None]
         self.page_bar.setVisible(self._paged)
         self.win.set_tab_title(self, self.title())
         self._fetch_next()
@@ -275,14 +290,24 @@ class SearchTab(QWidget):
         if self._inflight or self.model.exhausted:
             return
         self._inflight = True
-        self._cursor = (self._page or None) if self._paged else self._next_cursor
-        self.site.fetch(self._tags, self._cursor, self.model.generation, self.win.cfg)
+        if not self._paged:
+            self._cursor = self._next_cursor
+        elif self.site.page_jump:
+            self._cursor = self._page or None
+        else:
+            self._cursor = self._page_cursors[self._page]
+        self._request(self._cursor)
         self._update_counts()
+
+    def _request(self, cursor):
+        self.site.fetch(self._tags, cursor, self.model.generation, self.win.cfg)
 
     def go_page(self, page: int):
         """Page mode: show site page `page` (0-based) instead of the current one; ticks are kept."""
         if not self._paged or self._inflight or page < 0 or self.model.generation == 0:
             return
+        if not self.site.page_jump and page >= len(self._page_cursors):
+            return  # only pages already reached, or the next one, have a known cursor
         self._page = page
         self._hidden = self._blacklisted = 0
         self._thumb_queue.clear()
@@ -308,6 +333,8 @@ class SearchTab(QWidget):
         if not self._paged:
             self._pages += 1
             self._next_cursor = next_cursor
+        elif next_cursor is not None and page + 1 == len(self._page_cursors):
+            self._page_cursors.append(next_cursor)
         if next_cursor is None:
             self.model.exhausted = True
         if self._blacklist:
@@ -376,6 +403,11 @@ class SearchTab(QWidget):
             if not post.preview_url:
                 continue
             gen = self.model.generation
+            key = (gen, post.preview_url)
+            if key in self._thumb_waiting:  # e-hentai: one sprite sheet holds many pages' thumbnails
+                self._thumb_waiting[key].append(post)
+                continue
+            self._thumb_waiting[key] = [post]
             req = api.request(post.preview_url)
             reply = self.win.nam.get(req)
             self._thumb_active += 1
@@ -383,14 +415,19 @@ class SearchTab(QWidget):
             reply.finished.connect(lambda r=reply, p=post, g=gen: self._thumb_done(r, p, g))
 
     def _thumb_done(self, reply: QNetworkReply, post: Post, gen: int):
+        from .gallery import crop_sprite  # here: gallery imports this module
         self._thumb_active -= 1
         self._thumb_replies.discard(reply)
         data = bytes(reply.readAll()) if reply.error() == QNetworkReply.NoError else b""
         if not data:
             log.warning("thumbnail failed for post #%s: %s", post.id, reply.errorString())
         reply.deleteLater()
-        if gen == self.model.generation and data:
-            self.model.thumb_ready(post.id, data)
+        for p in self._thumb_waiting.pop((gen, post.preview_url), [post]):
+            if gen == self.model.generation and data:
+                sprite = p.album.get("sprite")
+                thumb = crop_sprite(data, sprite) if sprite else data
+                if thumb:
+                    self.model.thumb_ready(p.id, thumb)
         self._pump_thumbs()
 
     # ---- interaction
@@ -404,8 +441,8 @@ class SearchTab(QWidget):
 
     def _make_post_menu(self, post: Post) -> QMenu:
         m = QMenu(self)
-        m.addAction("Open in tab", lambda: self.win.open_viewer(post, False, self))
-        m.addAction("Open in background tab", lambda: self.win.open_viewer(post, True, self))
+        m.addAction("Open in tab", lambda: self._open(post, False))
+        m.addAction("Open in background tab", lambda: self._open(post, True))
         m.addAction("Open in browser", lambda: open_in_browser(post))
         m.addSeparator()
         m.addAction("Download", lambda: self.win.download_posts([post], self._include))
@@ -414,7 +451,13 @@ class SearchTab(QWidget):
         return m
 
     def _on_post_clicked(self, row: int, background: bool):
-        self.win.open_viewer(self.model.posts[row], background, self)
+        self._open(self.model.posts[row], background)
+
+    def _open(self, post: Post, background: bool):
+        if post.kind == "gallery":
+            self.win.open_gallery(post, background)
+        else:
+            self.win.open_viewer(post, background, self)
 
     def _current_page(self) -> int:
         """Site page (1-based) of the first post visible in the grid."""

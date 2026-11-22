@@ -24,6 +24,7 @@ from . import api, config, naming, secret, theme
 from .downloader import Downloader
 from .models import Post
 from .dialogs import SettingsDialog, UnlockDialog
+from .gallery import GalleryTab
 from .grid import ResultsModel
 from .search import FavoritesTab, SearchTab
 from .sites import Site, make_sites
@@ -229,6 +230,14 @@ class MainWindow(QMainWindow):
             tab.search()
         elif focus:
             tab.include_edit.setFocus()
+        return tab
+
+    def open_gallery(self, gallery: Post, background: bool) -> GalleryTab:
+        tab = GalleryTab(self, gallery)
+        i = self.tabs.addTab(tab, tab.title())
+        if not background:
+            self.tabs.setCurrentIndex(i)
+        tab.search()
         return tab
 
     def open_viewer(self, post: Post, background: bool, origin: SearchTab | None = None,

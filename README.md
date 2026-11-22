@@ -148,6 +148,11 @@ These follow `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when set
 
 Without a master password, the User ID and API key are stored in plain text in the settings file.
 
+## Support
+
+If the app is useful to you, you can buy the project a coffee on
+[Ko-fi](https://ko-fi.com/r34bulkdownloader). It's entirely optional.
+
 ## License
 
 R34 Downloader is free software under the [GNU General Public License v3.0](LICENSE). The AppImage bundles

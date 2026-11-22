@@ -233,7 +233,7 @@ def test_favorites_per_site_keep_rule34_file_untouched():
 
 
 def test_secret_blanks_eh_cookies(tmp_path):
-    cfg = {**config.DEFAULTS, "secret": {"x": 1}}
+    cfg = {**config.DEFAULTS, "secret": {"x": 1}, "sites": {}}  # own "sites": DEFAULTS["sites"] must stay empty
     config.site_cfg(cfg, "e-hentai").update(member_id="42", pass_hash="p")
     config.save(cfg)
     disk = json.loads(config.path().read_text())

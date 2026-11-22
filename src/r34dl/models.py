@@ -47,7 +47,11 @@ class Post:
              "preview_url": self.preview_url, "sample_url": self.sample_url, "tags": self.tags,
              "rating": self.rating, "score": self.score, "width": self.width, "height": self.height,
              "tag_info": {t: [k, c] for t, (k, c) in self.tag_info.items()}}
-        extra = {"kind": self.kind, "page_url": self.page_url, "album": self.album, "file_name": self.file_name}
+        album = self.album
+        if self.site == "e-hentai":  # resolved picture addresses expire: found again from page_url when opened
+            del d["file_url"]
+            album = {k: v for k, v in album.items() if k not in ("shown", "original")}
+        extra = {"kind": self.kind, "page_url": self.page_url, "album": album, "file_name": self.file_name}
         d.update({k: v for k, v in extra.items() if v and not (k == "kind" and v == "post")})
         return d
 
@@ -63,7 +67,7 @@ class Post:
             raise ValueError("file_url must be https")
         if site == "e-hentai" and not page_url.startswith("https://e-hentai.org/"):
             raise ValueError("page_url must be an e-hentai.org link")
-        return cls(int(d["id"]), str(d["hash"]), d["file_url"] if kind == "post" else https(d["file_url"]),
+        return cls(int(d["id"]), str(d["hash"]), d["file_url"] if kind == "post" else https(d.get("file_url")),
                    https(d.get("preview_url")),
                    https(d.get("sample_url")), [str(t) for t in d.get("tags", [])], str(d.get("rating", "")),
                    int(d.get("score", 0)), int(d.get("width", 0)), int(d.get("height", 0)),

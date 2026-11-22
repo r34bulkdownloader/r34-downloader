@@ -1508,3 +1508,150 @@ def test_no_native_video_windows(fresh, monkeypatch):
     embedded = [w.metaObject().className() for w in QApplication.allWindows()
                 if w.metaObject().className() not in ("QWidgetWindow",)]
     assert embedded == [], embedded
+
+
+# ---- e-hentai login, per-site blacklist and favorites (Task 9)
+
+def _eh_gallery(gid=7):
+    album = {"gid": gid, "token": "0123456789", "title": "A gallery", "pages": 40, "category": "Doujinshi"}
+    return Post(gid * 100000, "", "", "https://ehgt.org/t/cover.jpg", "", ["female:long_hair"], "doujinshi", 0, 0, 0,
+                site="e-hentai", kind="gallery", page_url=f"https://e-hentai.org/g/{gid}/0123456789/", album=album)
+
+
+def _eh_page(gid=7, page=3):
+    album = {"gid": gid, "token": "0123456789", "title": "A gallery", "pages": 40, "category": "Doujinshi",
+             "page": page, "sprite": (-100, 0, 100, 140),
+             "shown": "https://h.example.org/shown.jpg", "original": "https://e-hentai.org/fullimg/x"}
+    return Post(gid * 100000 + page, "", "https://h.example.org/shown.jpg", "https://ehgt.org/m/1.jpg", "",
+                ["female:long_hair"], "doujinshi", 0, 0, 0, site="e-hentai", kind="page",
+                page_url=f"https://e-hentai.org/s/abc/{gid}-{page}", album=album)
+
+
+def test_eh_login_sealed_with_password(win, monkeypatch):
+    from r34dl import config, secret
+    win.cfg.update(user_id="777", api_key="APIKEYVALUE")
+    dlg = ui.SettingsDialog(win.cfg, None, nam=win.nam)
+    dlg.eh_member_edit.setText("4242")
+    dlg.eh_hash_edit.setText("PASSHASHVALUE")
+    dlg.protect_check.setChecked(True)
+    dlg.new_pw.setText("hunter22")
+    dlg.new_pw2.setText("hunter22")
+    dlg.accept()
+    assert dlg.result() == ui.QDialog.Accepted
+    assert config.site_cfg(win.cfg, "e-hentai")["member_id"] == ""  # the caller's cfg is untouched
+    win.cfg, win._vault = dlg.result_cfg(), dlg.vault
+    assert config.site_cfg(win.cfg, "e-hentai")["pass_hash"] == "PASSHASHVALUE"  # in memory
+    disk = config.path().read_text()
+    assert "PASSHASHVALUE" not in disk and "4242" not in disk
+    sc = config.load()["sites"]["e-hentai"]
+    assert sc["member_id"] == "" and sc["pass_hash"] == ""
+    creds, _ = secret.unlock(config.load()["secret"], "hunter22")
+    assert creds["eh_member_id"] == "4242" and creds["eh_pass_hash"] == "PASSHASHVALUE"
+
+    def fake_exec(self):
+        self.pw.setText("hunter22")
+        self.try_unlock()
+        return ui.QDialog.Accepted
+    monkeypatch.setattr(ui.UnlockDialog, "exec", fake_exec)
+    w2 = ui.MainWindow()
+    assert not w2.sites["e-hentai"].queue.logged_in  # locked
+    w2._startup()
+    sc = config.site_cfg(w2.cfg, "e-hentai")
+    assert (sc["member_id"], sc["pass_hash"]) == ("4242", "PASSHASHVALUE") and "eh_member_id" not in w2.cfg
+    assert w2.sites["e-hentai"].queue.logged_in and w2.cfg["api_key"] == "APIKEYVALUE"
+    assert "PASSHASHVALUE" not in config.path().read_text()
+
+    monkeypatch.setattr(ui.UnlockDialog, "exec", lambda self: ui.UnlockDialog.FORGOT)
+    w3 = ui.MainWindow()
+    monkeypatch.setattr(w3, "open_settings", lambda: None)
+    w3._startup()  # forgotten password: the e-hentai login goes too
+    assert config.site_cfg(w3.cfg, "e-hentai")["member_id"] == "" and not w3.sites["e-hentai"].queue.logged_in
+
+
+def test_eh_login_applies_on_save_and_bad_value_refused(win, monkeypatch):
+    from r34dl import config
+    boxes = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: boxes.append(a[2])))
+    dlg = ui.SettingsDialog(win.cfg, None, nam=win.nam)
+    dlg.eh_member_edit.setText("42")
+    dlg.eh_hash_edit.setText("bad; value")
+    dlg.accept()
+    assert boxes and dlg.result() != ui.QDialog.Accepted
+
+    def fake_exec(self):
+        self.eh_member_edit.setText(" 42 ")
+        self.eh_hash_edit.setText("abc123")
+        self.accept()
+        return self.result()
+    monkeypatch.setattr(ui.SettingsDialog, "exec", fake_exec)
+    win.open_settings()
+    assert win.sites["e-hentai"].queue.logged_in
+    assert config.load()["sites"]["e-hentai"]["member_id"] == "42"  # not protected: saved plainly
+
+
+def test_settings_blacklist_per_site(win):
+    from r34dl import config
+    win.cfg["blacklist"] = "old"
+    dlg = ui.SettingsDialog(win.cfg, None, nam=win.nam, sites=list(win.sites))
+    assert dlg.blacklist_edit.toPlainText() == "old"
+    dlg.bl_site_box.setCurrentIndex(dlg.bl_site_box.findData("e-hentai"))
+    assert dlg.blacklist_edit.toPlainText() == ""
+    dlg.blacklist_edit.setPlainText("male:yaoi")
+    dlg.reject()
+    assert config.site_cfg(win.cfg, "e-hentai")["blacklist"] == ""  # Cancel changes nothing
+    dlg = ui.SettingsDialog(win.cfg, None, nam=win.nam, sites=list(win.sites))
+    dlg.bl_site_box.setCurrentIndex(dlg.bl_site_box.findData("e-hentai"))
+    dlg.blacklist_edit.setPlainText("male:yaoi")
+    dlg.bl_site_box.setCurrentIndex(dlg.bl_site_box.findData("rule34.xxx"))
+    assert dlg.blacklist_edit.toPlainText() == "old"
+    dlg.blacklist_edit.setPlainText("")
+    dlg.accept()
+    cfg = config.load()
+    assert cfg["blacklist"] == "" and cfg["sites"]["e-hentai"]["blacklist"] == "male:yaoi"
+
+
+def test_favorite_eh_page_not_storing_file_url(win):
+    import json
+    from r34dl import config
+    p = _eh_page()
+    win.toggle_favorite(p)
+    saved = json.loads(config.favorites_path("e-hentai").read_text())
+    assert len(saved) == 1 and "file_url" not in saved[0]
+    assert "shown" not in saved[0]["album"] and "original" not in saved[0]["album"]
+    assert "h.example.org" not in config.favorites_path("e-hentai").read_text()
+    assert config.load_favorites() == []  # rule34's file is untouched
+    back = ui.MainWindow().favorites["e-hentai"][p.id]
+    assert back.kind == "page" and back.page_url == p.page_url and back.preview_url == p.preview_url
+    assert back.file_url == "" and back.album["gid"] == 7 and back.album["page"] == 3
+    assert list(back.album["sprite"]) == [-100, 0, 100, 140]
+    g = _eh_gallery()
+    win.toggle_favorite(g)
+    assert ui.MainWindow().favorites["e-hentai"][g.id].album == g.album
+    assert p.file_url and "shown" in p.album  # the live post keeps its cached addresses
+
+
+def test_favorites_tab_site_switch(win):
+    win.toggle_favorite(_fav_post(1))
+    win.toggle_favorite(_eh_gallery())
+    win.open_favorites()
+    fav = win.tabs.currentWidget()
+    assert [p.id for p in fav.model.posts] == [1]
+    fav.site_box.setCurrentIndex(fav.site_box.findData("e-hentai"))
+    assert fav.site.name == "e-hentai" and [p.id for p in fav.model.posts] == [700000]
+    assert "ehentai_" in fav.template_label.text()
+    eh = win.sites["e-hentai"]
+    assert eh.page_ready.disconnect(fav._on_site_page)  # connected to the new site
+    eh.page_ready.connect(fav._on_site_page)
+
+
+def test_favorite_gallery_opens_gallery_tab(win, monkeypatch):
+    from r34dl.gallery import GalleryTab
+    monkeypatch.setattr(win.sites["e-hentai"], "fetch_gallery", lambda *a: None)
+    g = _eh_gallery()
+    win.toggle_favorite(g)
+    win.open_favorites()
+    fav = win.tabs.currentWidget()
+    fav.site_box.setCurrentIndex(fav.site_box.findData("e-hentai"))
+    fav._on_post_clicked(0, False)
+    gt = win.tabs.currentWidget()
+    assert isinstance(gt, GalleryTab) and gt.gallery.id == g.id

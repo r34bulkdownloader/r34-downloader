@@ -524,7 +524,10 @@ class FavoritesTab(SearchTab):
 
     def _site_changed(self, name: str):
         """Picker: show that site's favorites (one site at a time)."""
+        self._connect_site(False)
         self._use_site(name)
+        self._connect_site(True)
+        self.refresh_settings_labels()
         self.search()
 
     def _set_filter(self):

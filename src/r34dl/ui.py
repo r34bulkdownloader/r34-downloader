@@ -124,12 +124,16 @@ class MainWindow(QMainWindow):
             r = dlg.exec()
             creds, vault = dlg.creds, dlg.vault
             dlg.deleteLater()
-            if r == QDialog.Accepted:
-                self.cfg.update(creds)  # in memory only
+            if r == QDialog.Accepted:  # in memory only
+                config.site_cfg(self.cfg, "e-hentai").update(member_id=creds.pop("eh_member_id", ""),
+                                                             pass_hash=creds.pop("eh_pass_hash", ""))
+                self.cfg.update(creds)
                 self._vault = vault
                 self._eh_login()
             elif r == UnlockDialog.FORGOT:
                 self.cfg.update(secret={}, user_id="", api_key="")
+                config.site_cfg(self.cfg, "e-hentai").update(member_id="", pass_hash="")
+                self._eh_login()
                 try:
                     config.save(self.cfg, unprotect=True)
                 except OSError as e:
@@ -395,6 +399,7 @@ class MainWindow(QMainWindow):
         if accepted:
             self.cfg = dlg.result_cfg()  # not config.load(): protected credentials are only in memory
             self._vault = dlg.vault
+            self._eh_login()
             self._refresh_settings_labels()
             for tab in self.search_tabs():
                 if isinstance(tab, FavoritesTab):

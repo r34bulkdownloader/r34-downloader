@@ -27,7 +27,8 @@ Current version: **1.2.0**
 - **Tag suggestions:** both boxes suggest tags as you type, with how many posts each has.
 - **Universal blacklist** (Settings): tags left out of every search. A tag you explicitly include wins.
 - **Infinite scroll** or **page mode** (Settings): page mode has ◀/▶ page buttons and jump-to-page, and ticks are
-  kept across pages. The count line shows which page you're on.
+  kept across pages. The count line shows which page you're on and how many results the search has in all.
+  Infinite scroll loads 10 pages by itself, then shows **Load more** so a huge search doesn't load everything.
 - **★ Searches menu:** saved searches (save, load and delete the current tab's tags) and **followed tags**
   (one-click searches; follow a tag from its right-click menu in a post tab).
 - The first tab's exclude list is always remembered. A setting also remembers the include tags.

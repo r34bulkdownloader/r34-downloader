@@ -58,7 +58,7 @@ def test_failed_clears_inflight_keeps_pid(fresh, monkeypatch):
     monkeypatch.setattr(fresh.api, "fetch", lambda *a: None)
     fresh.first._fetch_next()
     fresh.first._on_failed(fresh.first.model.generation, "boom")
-    assert not fresh.first._inflight and fresh.first._next_pid == 0 and len(boxes) == 1
+    assert not fresh.first._inflight and fresh.first._pages == 0 and len(boxes) == 1
 
 
 def test_stale_failed_is_silent(fresh, monkeypatch):

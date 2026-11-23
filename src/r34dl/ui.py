@@ -192,8 +192,8 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.setCentralWidget(self.tabs)
-        include = self.cfg["include"] if self.cfg["remember_include"] else ""
         site = self.cfg["site"] if self.cfg["site"] in self.sites else "rule34.xxx"
+        include = config.site_cfg(self.cfg, site)["include"] if self.cfg["remember_include"] else ""
         self.first = SearchTab(self, include, config.site_cfg(self.cfg, site)["exclude"], site)
         self.tabs.addTab(self.first, "Search")
         self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.RightSide, None)
@@ -238,9 +238,9 @@ class MainWindow(QMainWindow):
 
     def open_search_tab(self, include: str = "", background: bool = False, focus: bool = False,
                         site: str | None = None) -> SearchTab:
-        """New search tab (on the first tab's site unless given); starts with the remembered exclude list.
+        """New search tab (on the site used last unless given); starts with the remembered exclude list.
         Searches right away if given tags."""
-        site = site or self.first.site.name
+        site = site or (self.cfg["site"] if self.cfg["site"] in self.sites else self.first.site.name)
         exclude = (self.first.exclude_edit.toPlainText() if site == self.first.site.name
                    else config.site_cfg(self.cfg, site)["exclude"])
         tab = SearchTab(self, include, exclude, site)
@@ -384,9 +384,10 @@ class MainWindow(QMainWindow):
             return False
 
     def _store_tags(self):
-        """Remember the first tab's tags (include only if the user wants it remembered)."""
-        config.site_cfg(self.cfg, self.first.site.name)["exclude"] = self.first.exclude_edit.toPlainText()
-        self.cfg["include"] = self.first.include_edit.toPlainText() if self.cfg["remember_include"] else ""
+        """Remember the first tab's tags (include only if the user wants it remembered), for its site."""
+        sc = config.site_cfg(self.cfg, self.first.site.name)
+        sc["exclude"] = self.first.exclude_edit.toPlainText()
+        sc["include"] = self.first.include_edit.toPlainText() if self.cfg["remember_include"] else ""
 
     def search_started(self, tab: SearchTab):
         if tab is self.first:
@@ -460,6 +461,8 @@ class MainWindow(QMainWindow):
                 p = Post.from_dict(d)
             except (KeyError, TypeError, ValueError):
                 continue  # kept in the file, just not shown
+            if p.site != site:
+                continue  # hand-edited into the wrong file: it would be looked up in the wrong dict
             posts.setdefault(p.id, p)
         self.favorites[site].clear()
         self.favorites[site].update(posts)

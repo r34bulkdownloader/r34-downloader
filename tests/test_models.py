@@ -41,3 +41,27 @@ def test_old_favorite_drops_saved_addresses():
     d["album"].update(shown="https://h.example.org/old.jpg", original="https://e-hentai.org/fullimg/x")  # saved before to_dict dropped them
     album = Post.from_dict(d).album
     assert "shown" not in album and "original" not in album and album["page"] == 3
+
+
+@pytest.mark.parametrize("site,field,value", [
+    ("rule34.xxx", "page_url", "file:///etc/passwd"),  # open_in_browser opens it
+    ("e-hentai", "gid", "7"),
+    ("e-hentai", "gid", True),
+    ("e-hentai", "token", 5),
+    ("e-hentai", "pages", "many"),
+    ("e-hentai", "page", None),
+])
+def test_bad_favorite_values_are_refused(site, field, value):
+    p = eh_page() if site == "e-hentai" else Post(5, "h", "https://x/a.jpg", "", "", [], "s", 0, 1, 1)
+    d = p.to_dict()
+    if field == "page_url":
+        d["page_url"] = value
+    else:
+        d["album"][field] = value
+    with pytest.raises(ValueError):
+        Post.from_dict(d)
+
+
+def test_rule34_favorite_with_an_https_page_url_is_kept():
+    d = Post(5, "h", "https://x/a.jpg", "", "", [], "s", 0, 1, 1, page_url="https://rule34.xxx/p").to_dict()
+    assert Post.from_dict(d).page_url == "https://rule34.xxx/p"

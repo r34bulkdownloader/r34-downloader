@@ -60,6 +60,7 @@ class SearchTab(QWidget):
         self._thumb_replies: set[QNetworkReply] = set()
         self._thumb_waiting: dict[tuple, list[Post]] = {}  # (generation, url) -> posts sharing that thumbnail
         self._page_cursors: list = [None]  # page mode on a site without page jump: cursor of each page seen
+        self._page_failed = False  # the last page asked for failed
         self._closed = False
         self._build_ui(include, exclude)
         self._connect_site(True)
@@ -283,6 +284,7 @@ class SearchTab(QWidget):
         self._paged = not self.win.cfg["infinite_scroll"]
         self._page = 0
         self._page_cursors = [None]
+        self._page_failed = False
         self.page_bar.setVisible(self._paged)
         self.win.set_tab_title(self, self.title())
         self._fetch_next()
@@ -308,7 +310,9 @@ class SearchTab(QWidget):
         if not self._paged or self._inflight or page < 0 or self.model.generation == 0:
             return
         if not self.site.page_jump and page >= len(self._page_cursors):
-            return  # only pages already reached, or the next one, have a known cursor
+            if not self._page_failed:
+                return  # only pages already reached, or the next one, have a known cursor
+            page = self._page  # the page that failed has no next cursor yet: ask for it again
         self._page = page
         self._hidden = self._blacklisted = 0
         self._thumb_queue.clear()
@@ -316,20 +320,16 @@ class SearchTab(QWidget):
         self.view.scrollToTop()
         self._fetch_next()
 
-    @property
-    def _next_pid(self) -> int:
-        """Old name of _pages (tests read it)."""
-        return self._pages
-
     def _on_page_ready(self, gen: int, posts: list, raw: int | None = None):
-        """A page given by its raw entry count, rule34-style (a full page means more): tests feed pages this way."""
+        """Test helper: a page given by its raw entry count, rule34-style (a full page means more). Page-number
+        cursors only exist on page-jump sites; elsewhere the next cursor is unknown, so it is the last page."""
         full = (len(posts) if raw is None else raw) >= PAGE_SIZE
-        self._on_site_page(gen, posts, (self._cursor or 0) + 1 if full else None)
+        self._on_site_page(gen, posts, (self._cursor or 0) + 1 if full and self.site.page_jump else None)
 
     def _on_site_page(self, gen: int, posts: list, next_cursor):
         if gen != self.model.generation or self._closed:
             return
-        self._inflight = False
+        self._inflight = self._page_failed = False
         page = self._page if self._paged else self._pages
         if not self._paged:
             self._pages += 1
@@ -359,6 +359,7 @@ class SearchTab(QWidget):
         if gen != self.model.generation or self._closed:
             return
         self._inflight = False
+        self._page_failed = True
         self._update_counts()  # re-enable page buttons, drop "loading…"
         self.fetch_finished.emit(False)
         msg = api.scrub(msg)

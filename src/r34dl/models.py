@@ -67,6 +67,13 @@ class Post:
             raise ValueError("file_url must be https")
         if site == "e-hentai" and not page_url.startswith("https://e-hentai.org/"):
             raise ValueError("page_url must be an e-hentai.org link")
+        if page_url and not https(page_url):  # open_in_browser opens it
+            raise ValueError("page_url must be https")
+        album = dict(d.get("album", {}))
+        if site == "e-hentai" and not (type(album.get("gid")) is int and isinstance(album.get("token"), str)):
+            raise ValueError("an e-hentai entry needs a numeric gid and a token")
+        if any(k in album and type(album[k]) is not int for k in ("page", "pages")):
+            raise ValueError("page numbers must be numbers")
         return cls(int(d["id"]), str(d["hash"]), d["file_url"] if kind == "post" else https(d.get("file_url")),
                    https(d.get("preview_url")),
                    https(d.get("sample_url")), [str(t) for t in d.get("tags", [])], str(d.get("rating", "")),
@@ -74,7 +81,7 @@ class Post:
                    {str(t): (str(v[0]), int(v[1])) for t, v in dict(d.get("tag_info", {})).items()},
                    site, kind, page_url,
                    # old favorites files kept resolved addresses; they expire, so they're found again when opened
-                   {k: v for k, v in dict(d.get("album", {})).items() if k not in ("shown", "original")},
+                   {k: v for k, v in album.items() if k not in ("shown", "original")},
                    str(d.get("file_name", "")))
 
     def tags_of(self, kind: str) -> list[str]:

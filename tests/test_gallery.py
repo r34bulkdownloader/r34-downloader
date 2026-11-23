@@ -357,3 +357,55 @@ def test_retry_failed_sends_ehentai_pictures_back_through_the_paced_lookups(win,
     assert resolved == [a]  # one at a time, paced: b waits for a's download
     assert len(sent) == 1 and sent[0].url == a.file_url
     assert "shown" not in b.album
+
+
+def test_favorite_in_the_wrong_sites_file_is_skipped(win):
+    r34 = Post(5, "h", "https://x/a.jpg", "", "", [], "s", 0, 1, 1).to_dict()
+    eh = pages(gallery(), 1, 1)[0].to_dict()
+    win._load_favorites([r34, eh], "e-hentai")
+    assert list(win.favorites["e-hentai"]) == [eh["id"]]
+    win._load_favorites([r34, eh], "rule34.xxx")
+    assert list(win.favorites["rule34.xxx"]) == [5]
+
+
+def test_ehentai_search_next_after_a_failed_page_asks_for_it_again(win, monkeypatch):
+    site = win.sites["e-hentai"]
+    asked, fail = [], []
+
+    def fetch(q, cursor, gen, cfg):
+        asked.append(cursor)
+        if fail:
+            return site.failed.emit(gen, fail.pop())
+        site.page_ready.emit(gen, [gallery(len(asked))], f"c{len(asked)}")
+    monkeypatch.setattr(site, "fetch", fetch)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    win.cfg["infinite_scroll"] = False
+    tab = win.open_search_tab(site="e-hentai")
+    tab.include_edit.setPlainText("x")
+    tab.search()
+    fail.append("e-hentai is rate limiting requests. Try again later.")
+    tab.next_page_btn.click()  # page 2 fails
+    assert asked == [None, "c1"]
+    tab.next_page_btn.click()  # asks for page 2 again (its cursor is known), not for an unknown page 3
+    assert asked == [None, "c1", "c1"] and tab.model.posts
+
+
+def test_new_tabs_start_on_the_site_used_last(win):
+    other = win.open_search_tab()
+    other._site_changed("e-hentai")
+    assert win.first.site.name == "rule34.xxx"
+    assert win.open_search_tab().site.name == "e-hentai"
+
+
+def test_remembered_include_belongs_to_the_site_it_was_typed_for(qapp, monkeypatch):
+    from r34dl import config
+    from r34dl.ui import MainWindow
+    cfg = {**config.DEFAULTS, "user_id": "1", "api_key": "k", "remember_include": True, "include": "long_hair",
+           "site": "e-hentai"}
+    config.site_cfg(cfg, "e-hentai")["include"] = "female:glasses"
+    config.save(cfg)
+    w = MainWindow()
+    assert w.first.site.name == "e-hentai" and w.first.include_edit.toPlainText() == "female:glasses"
+    w.first.include_edit.setPlainText("female:hat")
+    w._store_tags()
+    assert config.site_cfg(w.cfg, "e-hentai")["include"] == "female:hat" and w.cfg["include"] == "long_hair"

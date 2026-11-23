@@ -38,7 +38,7 @@ DEFAULTS = {
 }
 
 SITE_DEFAULTS = {
-    "e-hentai": {"exclude": "", "blacklist": "", "template": "ehentai_{album_id}_{page}",
+    "e-hentai": {"exclude": "", "include": "", "blacklist": "", "template": "ehentai_{album_id}_{page}",
                  "followed": [], "saved_searches": {}, "member_id": "", "pass_hash": ""},
 }
 

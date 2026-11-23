@@ -72,7 +72,10 @@ class Post:
                    https(d.get("sample_url")), [str(t) for t in d.get("tags", [])], str(d.get("rating", "")),
                    int(d.get("score", 0)), int(d.get("width", 0)), int(d.get("height", 0)),
                    {str(t): (str(v[0]), int(v[1])) for t, v in dict(d.get("tag_info", {})).items()},
-                   site, kind, page_url, dict(d.get("album", {})), str(d.get("file_name", "")))
+                   site, kind, page_url,
+                   # old favorites files kept resolved addresses; they expire, so they're found again when opened
+                   {k: v for k, v in dict(d.get("album", {})).items() if k not in ("shown", "original")},
+                   str(d.get("file_name", "")))
 
     def tags_of(self, kind: str) -> list[str]:
         return sorted(t for t, (k, _) in self.tag_info.items() if k == kind)

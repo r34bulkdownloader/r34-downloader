@@ -24,7 +24,7 @@ from .widgets import TagEdit, expand_dir, hint_label
 log = logging.getLogger(__name__)
 
 class UnlockDialog(QDialog):
-    """Startup: ask for the password that protects the User ID and API key."""
+    """Startup: ask for the password that protects the User ID, API key and e-hentai login."""
 
     FORGOT = 2  # exec() result: the user gave up on the password
 
@@ -35,7 +35,7 @@ class UnlockDialog(QDialog):
         self.creds: dict | None = None
         self.vault: secret.Vault | None = None
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Enter your password to unlock your User ID and API key."))
+        lay.addWidget(QLabel("Enter your password to unlock your User ID, API key and e-hentai login."))
         self.pw = QLineEdit()
         self.pw.setEchoMode(QLineEdit.Password)
         lay.addWidget(self.pw)
@@ -66,7 +66,7 @@ class UnlockDialog(QDialog):
             return
         except secret.BadSecret:
             self.msg.setText("The saved key can't be read (damaged or from another version). "
-                             "Use “Forgot password?” to enter your User ID and API key again.")
+                             "Use “Forgot password?” to enter your User ID, API key and e-hentai login again.")
             self.msg.setWordWrap(True)
             return
         self.pw.clear()  # don't keep the password text around
@@ -75,9 +75,11 @@ class UnlockDialog(QDialog):
     def _forgot(self):
         r = QMessageBox.question(
             self, "Forgot password",
-            "Your password can't be recovered. You can remove the protected User ID and API key and enter them "
-            "again (they're on your rule34.xxx account's Options page under API Access Credentials).\n\n"
-            "Only the saved User ID and API key are removed — searches, favorites and history stay.\n\n"
+            "Your password can't be recovered. You can remove the protected User ID, API key and e-hentai login and "
+            "enter them again (the first two are on your rule34.xxx account's Options page under API Access "
+            "Credentials, the e-hentai login in your browser's e-hentai.org cookies).\n\n"
+            "Only the saved User ID, API key and e-hentai login are removed — searches, favorites and history "
+            "stay.\n\n"
             "Remove them now?")
         if r == QMessageBox.Yes:
             self.done(self.FORGOT)
@@ -200,8 +202,8 @@ class SettingsDialog(QDialog):
         form.addRow("Repeat new password", self.new_pw2)
         self.pw_hint = hint_label(
             "The app will ask for this password when it starts. <b>If you forget it, it can't be recovered</b> — "
-            "you'd just enter your User ID and API key again (they're always on your rule34.xxx Options page). "
-            "Nothing else is lost.")
+            "you'd just enter your User ID and API key again (they're always on your rule34.xxx Options page) and "
+            "your e-hentai login, which is lost too (copy its cookies from your browser again). Nothing else is lost.")
         form.addRow(self.pw_hint)
         self._account_form = form
         self._update_password_rows()
@@ -487,8 +489,12 @@ class SettingsDialog(QDialog):
             return
         eh_login = self.eh_member_edit.text().strip(), self.eh_hash_edit.text().strip()
         if not all(re.fullmatch(r"[\w-]*", v) for v in eh_login):  # cookie values: no spaces or ; (ehclient)
-            QMessageBox.warning(self, "e-hentai login", "The Member ID and Pass hash are letters and digits only. "
-                                "Copy just the cookie values.")
+            QMessageBox.warning(self, "e-hentai login", "The Member ID and Pass hash are made of letters, digits, "
+                                "- and _ only. Copy just the cookie values.")
+            return
+        if all(eh_login) != any(eh_login):
+            QMessageBox.warning(self, "e-hentai login", "Fill in both the Member ID and the Pass hash, or leave both "
+                                "empty.")
             return
         config.site_cfg(self._cfg, "e-hentai").update(member_id=eh_login[0], pass_hash=eh_login[1])
         self._blacklists[self._bl_site] = self.blacklist_edit.toPlainText()

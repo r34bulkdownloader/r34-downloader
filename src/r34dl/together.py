@@ -84,7 +84,7 @@ class TogetherTab(QWidget):
             cell.setAlignment(Qt.AlignCenter)
             cell.setMinimumHeight(60)
             cell.setCursor(Qt.PointingHandCursor)
-            cell.setToolTip(f"#{p.id} · click to open")
+            cell.setToolTip(f"{p.label} · click to open")
             cell.clicked.connect(lambda p=p: self.open_requested.emit(p))
             self.cells[p.id] = cell
         self._relayout()
@@ -123,7 +123,7 @@ class TogetherTab(QWidget):
     def _get(self, post: Post):
         url = self._url(post)
         if not url:
-            self.cells[post.id].setText(f"#{post.id}")
+            self.cells[post.id].setText(f"{post.label}")
             return
         reply = self._nam.get(api.request(url))
         self._replies.add(reply)
@@ -137,7 +137,7 @@ class TogetherTab(QWidget):
             reply.finished.disconnect()
             reply.abort()
             reply.deleteLater()
-            self.cells[post.id].setText(f"#{post.id}: large GIF — click to open it")
+            self.cells[post.id].setText(f"{post.label}: large GIF — click to open it")
             self._pump()
 
     def _done(self, reply: QNetworkReply, post: Post):
@@ -149,7 +149,7 @@ class TogetherTab(QWidget):
         reply.deleteLater()
         cell = self.cells[post.id]
         if not ok:
-            cell.setText(f"#{post.id}: could not load")
+            cell.setText(f"{post.label}: could not load")
         elif post.ext == "gif":
             buf = QBuffer(self)
             buf.setData(data)
@@ -160,7 +160,7 @@ class TogetherTab(QWidget):
                 cell.setMovie(movie)
                 movie.start()
             else:
-                cell.setText(f"#{post.id}: could not decode")
+                cell.setText(f"{post.label}: could not decode")
         else:
             self._files[post.id] = data
         self._fit(post.id)

@@ -1577,6 +1577,10 @@ def test_eh_login_applies_on_save_and_bad_value_refused(win, monkeypatch):
     dlg.eh_hash_edit.setText("bad; value")
     dlg.accept()
     assert boxes and dlg.result() != ui.QDialog.Accepted
+    assert "- and _" in boxes[-1]
+    dlg.eh_hash_edit.setText("")  # only one of the two filled in
+    dlg.accept()
+    assert len(boxes) == 2 and "both" in boxes[-1] and dlg.result() != ui.QDialog.Accepted
 
     def fake_exec(self):
         self.eh_member_edit.setText(" 42 ")
@@ -1639,6 +1643,14 @@ def test_favorites_tab_site_switch(win):
     fav.site_box.setCurrentIndex(fav.site_box.findData("e-hentai"))
     assert fav.site.name == "e-hentai" and [p.id for p in fav.model.posts] == [700000]
     assert "ehentai_" in fav.template_label.text()
+    assert "female:long hair" in fav.tags_hint.text() and "language:" in fav.include_edit.placeholderText()
+    assert "Filters your saved favorites" in fav.tags_hint.text()
+    fav.include_edit.setPlainText("female:long_hair")  # namespaced e-hentai tags filter locally
+    fav.search()
+    assert [p.id for p in fav.model.posts] == [700000]
+    fav.include_edit.setPlainText("female:short_hair")
+    fav.search()
+    assert fav.model.posts == []
     eh = win.sites["e-hentai"]
     assert eh.page_ready.disconnect(fav._on_site_page)  # connected to the new site
     eh.page_ready.connect(fav._on_site_page)
@@ -1655,3 +1667,21 @@ def test_favorite_gallery_opens_gallery_tab(win, monkeypatch):
     fav._on_post_clicked(0, False)
     gt = win.tabs.currentWidget()
     assert isinstance(gt, GalleryTab) and gt.gallery.id == g.id
+
+
+def test_eh_tag_list_shows_no_zero_counts(qapp):
+    tl = ui.TagList()
+    g = _eh_gallery()
+    g.tag_info = {"female:long_hair": ("general", 0)}  # as parse_gdata makes it: e-hentai sends no counts
+    tl.set_post(g)
+    assert [tl.item(i).text() for i in range(tl.count())] == ["General", "  female:long_hair"]
+
+
+def test_eh_retarget_keeps_history_and_zip_tracking(win, tmp_path):
+    job = ui._ZipJob("z", tmp_path, {str(tmp_path / "a.png"), str(tmp_path / "b.png")})
+    win._zip_jobs.append(job)
+    win._target_ids[str(tmp_path / "a.png")] = ("e-hentai", 700001)
+    win.feeder.retargeted.emit(str(tmp_path / "a.png"), str(tmp_path / "a.webp"))
+    assert job.pending == {str(tmp_path / "a.webp"), str(tmp_path / "b.png")}
+    assert win._target_ids == {str(tmp_path / "a.webp"): ("e-hentai", 700001)}
+    win._zip_jobs.remove(job)

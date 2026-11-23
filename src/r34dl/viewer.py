@@ -206,7 +206,8 @@ class TagList(QListWidget):
                 self._add_tag(t, color, post.tag_info.get(t, ("other", None))[1])
 
     def _add_tag(self, tag: str, color: QColor | None, count: int | None):
-        item = QListWidgetItem(f"  {tag}  {count:,}" if count is not None else tag)
+        # e-hentai sends no post counts (0): show none rather than "0"
+        item = QListWidgetItem(f"  {tag}  {count:,}" if count else f"  {tag}" if color is not None else tag)
         item.setData(Qt.UserRole, tag)
         if color is not None:
             item.setForeground(color)
@@ -338,7 +339,7 @@ class ViewerTab(QWidget):
         self.selected = QCheckBox("Selected")
         self.selected.toggled.connect(self._toggle_selected)
         self.browser_btn = QPushButton("Open in browser")
-        self.browser_btn.setToolTip("Open this post's page on rule34.xxx in your web browser")
+        self.browser_btn.setToolTip("Open this post's page on its site in your web browser")
         self.browser_btn.clicked.connect(lambda: open_in_browser(self.post))
         self.download_btn = QPushButton("Download")
         self.download_btn.clicked.connect(lambda: self.download_requested.emit(self.post))

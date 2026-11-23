@@ -507,17 +507,23 @@ class FavoritesTab(SearchTab):
 
     def __init__(self, win: "MainWindow"):
         super().__init__(win, "", "")
-        self.include_edit.setPlaceholderText("filter by tag, e.g.\nlong_hair\nrating:explicit")
-        self.exclude_edit.setPlaceholderText("hide favorites with\nany of these")
         self.search_btn.setText("Filter")
-        self.tags_hint.setText(
-            "Filters your saved favorites on this computer (no searching the site). One tag per line; "
-            "<b>rating:explicit</b> / <b>rating:questionable</b> work, site extras like <b>sort:</b> don't. "
-            "Your blacklist applies here too.")
         self.together_btn.setToolTip("Open the ticked favorites side by side")
 
     def title(self) -> str:
         return "♥ Favorites"
+
+    def _show_site(self):
+        super()._show_site()
+        eh = self.site.name == "e-hentai"
+        self.include_edit.setPlaceholderText("filter by tag, e.g.\n" + (
+            "female:long hair\nlanguage:english" if eh else "long_hair\nrating:explicit"))
+        self.exclude_edit.setPlaceholderText("hide favorites with\nany of these")
+        self.tags_hint.setText(
+            "Filters your saved favorites on this computer (no searching the site). " + (
+                "One tag per line or comma-separated, with its namespace: <b>female:long hair</b>. " if eh else
+                "One tag per line; <b>rating:explicit</b> / <b>rating:questionable</b> work, site extras like "
+                "<b>sort:</b> don't. ") + "Your blacklist applies here too.")
 
     def can_load_more(self) -> bool:
         return False
@@ -527,6 +533,7 @@ class FavoritesTab(SearchTab):
         self._connect_site(False)
         self._use_site(name)
         self._connect_site(True)
+        self._show_site()
         self.refresh_settings_labels()
         self.search()
 
@@ -551,7 +558,8 @@ class FavoritesTab(SearchTab):
 
     def _matches(self, post: Post) -> bool:
         tags = {t.lower() for t in post.tags}
-        plain = {t for t in self._need if ":" not in t}
+        # e-hentai tags all have a namespace; on rule34.xxx a ":" is a site extra (sort:, score:) we can't check
+        plain = {t for t in self._need if ":" not in t or self.site.name == "e-hentai"}
         ratings = {t for t in self._need if t.startswith("rating:")}
         return plain <= tags and (not ratings or self._hits(post, ratings)) and not self._hits(post, self._avoid)
 

@@ -34,3 +34,10 @@ def test_rule34_dict_unchanged_and_label():
     assert p.label == "#5"
     assert eh_page().label == "T" * 30 + " · p3"
     assert eh_page(kind="gallery").label == "T" * 40
+
+
+def test_old_favorite_drops_saved_addresses():
+    d = eh_page().to_dict()
+    d["album"].update(shown="https://h.example.org/old.jpg", original="https://e-hentai.org/fullimg/x")  # saved before to_dict dropped them
+    album = Post.from_dict(d).album
+    assert "shown" not in album and "original" not in album and album["page"] == 3

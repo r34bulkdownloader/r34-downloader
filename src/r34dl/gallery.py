@@ -30,6 +30,14 @@ class GalleryTab(SearchTab):
     """The pages of one gallery; paging follows the gallery's ?p= pages."""
 
     filters = False  # opened on purpose: show every page (blacklisted galleries are left out of searches)
+    always_more = True  # "Continue loading" is always there while the gallery has more pages
+
+    def _more_text(self) -> str:
+        if self._page_failed:
+            return "Try again"
+        total = self.gallery.album.get("pages")
+        of = f" of {total}" if isinstance(total, int) and total > 0 else ""
+        return f"Continue loading ({len(self.model.posts)}{of} pictures loaded)"
 
     def __init__(self, win: "MainWindow", gallery: Post):
         self.gallery = gallery

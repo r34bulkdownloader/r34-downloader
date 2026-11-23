@@ -435,3 +435,36 @@ def test_gallery_tab_download_buttons_take_the_whole_gallery(win, monkeypatch):
     acts[1].trigger()
     acts[2].trigger()
     assert calls == [("files", [g], "A gallery"), (False, [g], "A gallery"), (True, [g], "A gallery")]
+
+
+def test_gallery_tab_continue_loading_button(win, monkeypatch):
+    asked = []
+    monkeypatch.setattr(win.sites["e-hentai"], "fetch_gallery", lambda g, p, gen: asked.append(p))
+    monkeypatch.setattr("PySide6.QtWidgets.QMessageBox.warning", lambda *a: None)  # the failure's message box
+    g = gallery(pages=50)
+    gt = win.open_gallery(g, False)
+    btn = gt.more_btn
+    assert not btn.isVisibleTo(gt)  # first page still loading
+    gt._on_site_page(gt.model.generation, pages(g, 1, 20), 1)
+    assert btn.isVisibleTo(gt) and btn.text() == "Continue loading (20 of 50 pictures loaded)"
+    btn.click()
+    assert asked[-1] == 1 and not btn.isVisibleTo(gt)  # loading: hidden until the page is in
+    gt._on_failed(gt.model.generation, "network error")
+    assert btn.isVisibleTo(gt) and btn.text() == "Try again"
+    btn.click()
+    gt._on_site_page(gt.model.generation, pages(g, 21, 30), None)  # last page
+    assert not btn.isVisibleTo(gt)
+
+
+def test_search_tab_offers_try_again_after_a_failed_page(win, monkeypatch):
+    tab = win.first
+    monkeypatch.setattr(tab.site, "fetch", lambda *a: None)
+    tab._inflight = False
+    tab.include_edit.setPlainText("a")
+    monkeypatch.setattr("PySide6.QtWidgets.QMessageBox.warning", lambda *a: None)
+    tab.search()
+    tab._on_site_page(tab.model.generation, pages(gallery(), 1, 3), 1)
+    assert not tab.more_btn.isVisibleTo(tab)  # scrolling carries on by itself
+    tab._fetch_next()
+    tab._on_failed(tab.model.generation, "network error")
+    assert tab.more_btn.isVisibleTo(tab) and tab.more_btn.text() == "Try again"

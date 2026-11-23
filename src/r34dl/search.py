@@ -37,6 +37,7 @@ class SearchTab(QWidget):
 
     fetch_finished = Signal(bool)  # a page request ended (True = a page arrived, False = it failed)
     filters = True  # blacklist and hide-downloaded leave posts out of the results
+    always_more = False  # show the load-more button whenever more pages exist, not only at the cap
 
     def __init__(self, win: "MainWindow", include: str = "", exclude: str = "", site: str = "rule34.xxx"):
         super().__init__()
@@ -402,10 +403,21 @@ class SearchTab(QWidget):
             self._fetch_next()
 
     def _at_auto_limit(self) -> bool:
-        """Infinite scroll has loaded its share of pages: show "Load more" instead of loading on."""
+        """Infinite scroll has loaded its share of pages: "Load more" instead of loading on."""
         stop = not self._paged and not self.model.exhausted and self._pages >= self._auto_limit
-        self.more_btn.setVisible(stop and not self._inflight)
+        self._update_more_btn()
         return stop
+
+    def _update_more_btn(self):
+        """Shown when scrolling won't load on by itself: the page cap was reached or the last page failed (a
+        grid already at the bottom never scrolls again to retry). Gallery tabs always show it while pages remain."""
+        can = not self._paged and not self.model.exhausted and not self._inflight and self.model.generation > 0
+        need = self.always_more or self._page_failed or self._pages >= self._auto_limit
+        self.more_btn.setText(self._more_text())
+        self.more_btn.setVisible(bool(can and need))
+
+    def _more_text(self) -> str:
+        return "Try again" if self._page_failed else f"Load more ({AUTO_PAGES} pages)"
 
     def _load_more_pages(self):
         self._auto_limit = self._pages + AUTO_PAGES
@@ -502,6 +514,7 @@ class SearchTab(QWidget):
         return self.model.page_of.get(post.id, 0) + 1 if post else 1
 
     def _update_counts(self):
+        self._update_more_btn()  # runs on every load start, page, failure and search
         n = len(self.model.checked)
         hidden = f" · {self._hidden} already downloaded (hidden)" if self._hidden else ""
         hidden += f" · {self._blacklisted} hidden by blacklist" if self._blacklisted else ""

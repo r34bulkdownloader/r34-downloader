@@ -1,12 +1,12 @@
 # R34 Downloader
 
-A desktop app for Linux to search rule34.xxx, preview posts (pictures, GIFs and videos), and download them one
-at a time or in bulk. It ships as a single AppImage that brings its own Python and Qt, so it runs on any
+A desktop app for Linux to search rule34.xxx and e-hentai.org, preview posts (pictures, GIFs and videos) and
+galleries, and download them one at a time or in bulk. It ships as a single AppImage that brings its own Python and Qt, so it runs on any
 reasonably recent distribution without installing anything.
 
 **18+ only.** This is a tool for an adult website.
 
-Current version: **1.1.0**
+Current version: **1.2.0**
 
 ![Search tab: tag boxes on the left, results grid with tick boxes, favorite and downloaded marks](screenshots/search.png)
 
@@ -79,7 +79,8 @@ Current version: **1.1.0**
 - Every download is remembered in a history (the green ↓ mark).
 
 ### File names
-The name template is set in Settings, with a live preview. The default is `rule34_{id}_{hash}`.
+The name template is set in Settings per site, with a live preview. The defaults are `rule34_{id}_{hash}` for
+rule34.xxx and `ehentai_{album_id}_{page}` for e-hentai.
 A `/` in the template makes subfolders.
 
 | Token | Meaning |
@@ -92,6 +93,8 @@ A `/` in the template makes subfolders.
 | `{search}` | the include tags of the search the post came from |
 | `{rating}` `{score}` `{width}` `{height}` | post details |
 | `{index}` | position in an album download (001, 002, …) |
+| `{site}` | the site (`rule34.xxx`, `e-hentai`) |
+| `{album}` `{album_id}` `{page}` | e-hentai: gallery title, gallery number, page number (001, 002, …) |
 
 Names are cleaned for the file system and shortened if too long; an existing file is never overwritten
 (`_1`, `_2`… is added).
@@ -99,9 +102,39 @@ Names are cleaned for the file system and shortened if too long; an existing fil
 ### Look and privacy
 - **Themes:** System (follows the desktop), Light, Dark, Black (OLED), R34 (greens), Sunset, Midnight, Pink,
   Black & Gold. Applied instantly; tag colours adjust to stay readable on each.
-- **Optional master password** for the User ID and API key: encrypted with scrypt + AES-GCM, asked once at
+- **Optional master password** for the User ID, API key and e-hentai login: encrypted with scrypt + AES-GCM, asked once at
   startup. A forgotten password can't be recovered; you enter the key again from your rule34.xxx account.
 - **Log viewer** (Settings → Show log…). API keys are removed from every log line.
+
+## e-hentai.org
+
+Pick **e-hentai** in the site picker above the tag boxes. Everything works without an account.
+
+- **Search** with the same include/exclude boxes. e-hentai tags have namespaces and may contain spaces, so put
+  one per line or separate them with commas: `artist:name`, `female:long hair`, `language:english`. The grid
+  shows one cover per gallery with its page count; scrolling loads more. The blacklist, saved searches and
+  followed tags are kept per site.
+- **Open a gallery:** a gallery tab with its title, category and tags, and its pages as a thumbnail grid (ticking,
+  **Download**, **Download as folder/ZIP…**, **Open together** and **Slideshow** work as in a search).
+- **View:** a page opens in a post tab (◀/▶ step through the gallery) or in the slideshow.
+- **Download** ticked pages, ticked galleries (all their pages), or a gallery as one folder or ZIP. Files are
+  named `ehentai_<gallery>_<page>` by default. Favorites and the download history are kept per site.
+
+**Pacing and image limits.** The app talks to e-hentai one request at a time, at least a second apart, with a
+5-second pause after every 4 requests, and backs off when the site says it's busy. Every picture costs one page
+load plus the picture, so a 100-page gallery takes a few minutes. e-hentai counts the pictures you view against an
+image limit (per IP address, or per account when logged in); when it's reached, downloads pause and the status bar
+has **Resume e-hentai downloads** for later. Downloads of more than 200 pictures ask first. If e-hentai says pages are opened too
+fast, the app stops for a while; downloads pause too.
+
+**Optional login (originals).** Without a login, downloads save the resized copy the site shows (usually up to
+1280 px wide). With a login, downloads save the original file when the page offers one (viewing and the slideshow
+still use the resized copy). Originals use more of your image limit. To log in, sign in on e-hentai.org in your
+browser, open the developer tools (F12) → **Storage** (Firefox) or **Application** (Chrome) → **Cookies** →
+`https://e-hentai.org`, and copy the values of `ipb_member_id` and `ipb_pass_hash` into **Settings → e-hentai
+login**. They're stored like the rule34.xxx key: in the settings file, or encrypted with the master password.
+
+Not supported: exhentai.org, torrents and archive downloads.
 
 ## Getting an API key
 
@@ -140,14 +173,15 @@ All files are readable only by you (mode 0600).
 | What | Where |
 |---|---|
 | Settings (and the credentials, encrypted if a password is set) | `~/.config/r34-downloader/config.json` |
-| Download history | `~/.local/share/r34-downloader/history.txt` |
-| Favorites | `~/.local/share/r34-downloader/favorites.json` |
+| Download history | `~/.local/share/r34-downloader/history.txt` (e-hentai: `history-e-hentai.txt`) |
+| Favorites | `~/.local/share/r34-downloader/favorites.json` (e-hentai: `favorites-e-hentai.json`) |
 | Log | `~/.local/state/r34-downloader/log.txt` |
 
 These follow `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when set. Downloads go to
 `~/Downloads/rule34` by default (changeable in Settings or with **Choose folder…**).
 
-Without a master password, the User ID and API key are stored in plain text in the settings file.
+Without a master password, the User ID, API key and e-hentai login are stored in plain text in the settings
+file.
 
 ## Support
 
@@ -160,8 +194,8 @@ R34 Downloader is free software under the [GNU General Public License v3.0](LICE
 Python, Qt (PySide6), FFmpeg and a few small libraries under their own licenses; see
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-This project isn't affiliated with rule34.xxx. Follow the site's rules and your local laws.
+This project isn't affiliated with rule34.xxx or e-hentai.org. Follow the site's rules and your local laws.
 
 ## Plans
 
-See [TODO.md](TODO.md): other boorus and e-hentai.org album support.
+See [TODO.md](TODO.md): other boorus and exhentai.org.

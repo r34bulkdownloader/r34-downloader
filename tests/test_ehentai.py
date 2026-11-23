@@ -126,7 +126,7 @@ def test_parse_gallery_pages_and_next():
     assert p.id == 4348914 * 100000 + 4 and p.kind == "page" and p.site == "e-hentai"
     assert p.page_url == f"{EH}/s/1218b3f3be/4348914-4"
     assert p.file_name == "2.png" and p.ext == "png"
-    assert p.preview_url == "https://zurswtyclg.hath.network/c2/pb1pgi2ukx8s9q1a5y/4348914-0.webp"
+    assert p.preview_url == "https://node2.example.hath.network/c2/111111111111111111/4348914-0.webp"
     assert p.album["sprite"] == (600, 0, 200, 113)
     assert p.album["page"] == 4 and p.album["gid"] == 4348914 and p.album["title"] == g.album["title"]
     assert p.tags == g.tags and p.tag_info == g.tag_info
@@ -151,8 +151,8 @@ def test_parse_gallery_content_warning():
 
 def test_parse_picture_shown_and_original():
     shown, orig = parse_picture(fixture("picture_original.html"))
-    assert shown.startswith("https://dpncxca.dxnltjxeaefj.hath.network:31209/h/") and shown.endswith("/2.webp")
-    assert orig == f"{EH}/fullimg/4348914/4/14j5vtiaotb/2.png"
+    assert shown.startswith("https://node1.example.hath.network:31209/h/") and shown.endswith("/2.webp")
+    assert orig == f"{EH}/fullimg/4348914/4/0examplekey/2.png"
 
 
 def test_parse_picture_without_original():
@@ -182,7 +182,7 @@ def test_safe_image_url():
     assert safe_image_url("http://8.8.8.8/x") and safe_image_url("http://[2606:4700::1111]/x")
     assert safe_image_url("http://[64:ff9b::808:808]/x")  # NAT64 of a public IPv4
     assert safe_image_url("https://beef.cafe/x.jpg")  # hex-looking host name is still a name
-    assert safe_image_url("https://dpncxca.dxnltjxeaefj.hath.network:31209/h/a/2.webp")
+    assert safe_image_url("https://node1.example.hath.network:31209/h/a/2.webp")
     assert not safe_image_url("http://10.0.0.1/x") and not safe_image_url("http://LOCALHOST./x")
 
 

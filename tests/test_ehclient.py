@@ -230,7 +230,7 @@ def _resolve(site, post, for_download):
 
 def test_resolve_prefers_original_only_when_logged_in_and_downloading(qapp):
     site = _site({"/s/": (200, fix("picture_original.html"))})
-    full = "https://e-hentai.org/fullimg/4348914/4/14j5vtiaotb/2.png"
+    full = "https://e-hentai.org/fullimg/4348914/4/0examplekey/2.png"
     p = _page()
     assert _resolve(site, p, True) is None and p.file_url != full and "hath.network" in p.file_url  # not logged in
     site.queue.set_login("9", "abc")

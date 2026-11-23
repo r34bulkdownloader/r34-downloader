@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from collections import deque
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
@@ -19,6 +20,11 @@ EH_BURST = 4
 EH_WARN_PICTURES = 200  # a bigger download batch asks first
 CANCELLED = "cancelled"  # error given to jobs dropped by clear()
 WARNING_MSG = "This gallery is behind a content warning that the app couldn't skip."
+BLOCKED_MSG = ("e-hentai says pages are being opened too fast, or has blocked this IP address for a while. "
+               "Wait (it can take an hour) and try again.")
+_BLOCKED_TEXTS = (b"opening pages too fast", b"temporarily banned")  # its short plain-text warning/ban pages
+EH_BLOCKED_PAUSE_MS = 60000  # after such a page nothing is sent for a minute
+_IMAGE_EXT = ("jpg", "jpeg", "png", "gif", "webp")
 _ORIGINS = ("https://e-hentai.org/", "https://api.e-hentai.org/")
 _list_gens = itertools.count(-1, -1)  # list_all_pages' generations: search tabs use positive ones
 
@@ -106,6 +112,9 @@ class EhQueue(QObject):
             err = "e-hentai redirected to another site."
         elif reply.error() != QNetworkReply.NoError:
             err = api.scrub(reply.errorString())
+        elif len(data) < 4096 and any(t in data for t in _BLOCKED_TEXTS):  # real pages are far bigger
+            err = BLOCKED_MSG
+            self._next_at = max(self._next_at, time.monotonic() + EH_BLOCKED_PAUSE_MS / 1000)
         else:
             err = ""
         if err:
@@ -256,8 +265,9 @@ class EhDownloadFeeder(QObject):
     """Hands e-hentai pages to the downloader one at a time: resolve (paced by the site queue), download, and
     only after that item_done the next. Originals get the login cookie; resized H@H copies never do."""
 
-    paused = Signal(str)  # "IMAGE_LIMIT": stopped, the rest is kept until resume()
+    paused = Signal(str)  # "IMAGE_LIMIT" or BLOCKED_MSG: stopped, the rest is kept until resume()
     failed = Signal(str, str)  # picture page, target: it couldn't be resolved (so ZIP jobs still complete)
+    retargeted = Signal(str, str)  # old target, new one: the picture found is another type than the page's name said
 
     def __init__(self, site: EhentaiSite, downloader, parent=None):
         super().__init__(parent)
@@ -305,7 +315,7 @@ class EhDownloadFeeder(QObject):
         self._busy = False
         if err == CANCELLED:  # someone cleared the site queue: silent, ask again
             return self._next()
-        if err == "IMAGE_LIMIT":
+        if err in ("IMAGE_LIMIT", BLOCKED_MSG):  # going on would only make it worse
             self._paused = True
             return self.paused.emit(err)
         self._jobs.popleft()
@@ -313,6 +323,11 @@ class EhDownloadFeeder(QObject):
             log.warning("e-hentai picture not downloaded: %s", api.scrub(err))
             self.failed.emit(post.page_url, str(target))
             return self._next()
+        ext = post.ext  # now from the resolved address: a resized copy is often another type (page_1.png -> .webp)
+        if ext in _IMAGE_EXT and Path(target).suffix.lower() != f".{ext}":
+            new = Path(target).with_suffix(f".{ext}")
+            self.retargeted.emit(str(target), str(new))
+            target = new
         q = self.site.queue
         # the album may come from a favorites file: the login cookie only ever goes to e-hentai's fullimg
         original = (q.logged_in and post.file_url == post.album.get("original")

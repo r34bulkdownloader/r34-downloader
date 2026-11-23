@@ -390,7 +390,8 @@ def test_feeder_original_has_cookie(qapp, tmp_path):
         if logged_in:
             assert "/fullimg/" in item[0] and item[2] == {b"Cookie": b"ipb_member_id=9; ipb_pass_hash=abc; nw=1"}
         else:
-            assert item == (p.album["shown"], tmp_path / "a.png") and "hath.network" in item[0]
+            # the resized copy of 2.png is a .webp: saved under that type
+            assert item == (p.album["shown"], tmp_path / "a.webp") and "hath.network" in item[0]
 
 
 def test_large_batch_asks(qapp, tmp_path, monkeypatch):
@@ -465,3 +466,47 @@ def test_feeder_pauses_when_the_downloader_reports_the_limit(qapp, tmp_path):
     assert paused == ["IMAGE_LIMIT"] and len(site.calls) == 1 and f.active
     f.resume()
     assert site.calls == [pages[0], pages[0]] and len(dl.added) == 2  # the same picture again
+
+
+def test_queue_too_fast_page_is_an_error_and_holds_the_queue(qapp):
+    # ehwiki "Technical Issues": e-hentai answers 200 with a short plain-text warning or temporary IP ban
+    warn = (b"You are opening pages too fast, thus placing a heavy load on the server. "
+            b"Back down, or your IP address will be automatically banned.")
+    nam = FakeNam({"e-hentai.org": [(200, warn), (200, b"ok")]})
+    q = fast(EhQueue(nam=nam))
+    got = []
+    q.get("https://e-hentai.org/a", lambda s, b, e: got.append(e))
+    spin_until(lambda: got)
+    assert got == [ehclient.BLOCKED_MSG]
+    assert q._next_at - time.monotonic() > 50  # nothing else is sent for about a minute
+    big = b"<html>" + b"x" * 5000 + b"a comment: I was temporarily banned once</html>"
+    nam.routes["e-hentai.org"] = (200, big)
+    q._next_at = 0
+    q.get("https://e-hentai.org/g/1/0123456789/", lambda s, b, e: got.append(e))
+    spin_until(lambda: len(got) == 2)
+    assert got[1] == ""  # a real page that merely mentions it is fine
+
+
+def test_feeder_pauses_when_blocked(qapp, tmp_path):
+    site, dl = FakeSite(), FakeDownloader()
+    f = ehclient.EhDownloadFeeder(site, dl)
+    pages = _pages(2)
+    site.answers[pages[0].id] = ehclient.BLOCKED_MSG
+    paused = []
+    f.paused.connect(paused.append)
+    f.add([(p, tmp_path / f"{i}.jpg") for i, p in enumerate(pages)])
+    assert paused == [ehclient.BLOCKED_MSG] and len(site.calls) == 1 and not dl.added and f.active
+
+
+def test_feeder_names_the_file_by_the_type_it_got(qapp, tmp_path):
+    # live check: page_1.png's resized copy is a .webp; it must not be saved as .png
+    site, dl = FakeSite(), FakeDownloader()
+    f = ehclient.EhDownloadFeeder(site, dl)
+    moved = []
+    f.retargeted.connect(lambda old, new: moved.append((old, new)))
+    f.add([(_pages(1)[0], tmp_path / "ehentai_1_001.png")])
+    assert dl.added[0][1] == tmp_path / "ehentai_1_001.jpg"
+    assert moved == [(str(tmp_path / "ehentai_1_001.png"), str(tmp_path / "ehentai_1_001.jpg"))]
+    dl.finish()
+    f.add([(_pages(2)[1], tmp_path / "ehentai_1_002.jpg")])  # same type: kept
+    assert dl.added[1][1] == tmp_path / "ehentai_1_002.jpg" and len(moved) == 1

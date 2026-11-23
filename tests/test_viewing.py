@@ -330,3 +330,11 @@ def test_slideshow_pauses_on_the_image_limit(win):
     s.go(1)
     assert s._paused and not s._timer.isActive() and s.current().id == 1
     assert "image limit" in s.picture.text()
+
+
+def test_slideshow_decode_relay_carries_eh_sized_ids(win):
+    big = 4349020 * 100000 + 2  # e-hentai page ids pass 32 bits: a Signal(int) argument overflowed (live check)
+    s = _show([mk(1), mk(2)], win=win)
+    s._decoding.add(big)
+    slideshow.relay().decoded.emit(s._serial, big, None)
+    assert big not in s._decoding

@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         self.feeder = EhDownloadFeeder(self.sites["e-hentai"], self.downloader, self)
         self.feeder.paused.connect(self._on_eh_paused)
         self.feeder.failed.connect(self._on_eh_failed)
+        self.feeder.retargeted.connect(self._on_eh_retargeted)
         self.nam = QNetworkAccessManager(self)
         self._build_ui()
         self.downloader.progress.connect(self._on_progress)
@@ -636,6 +637,14 @@ class MainWindow(QMainWindow):
         self.resume_btn.hide()
         self.statusBar().clearMessage()
         self.feeder.resume()
+
+    def _on_eh_retargeted(self, old: str, new: str):
+        if old in self._target_ids:
+            self._target_ids[new] = self._target_ids.pop(old)
+        for job in self._zip_jobs:
+            if old in job.pending:
+                job.pending.discard(old)
+                job.pending.add(new)
 
     def _on_eh_failed(self, page: str, target: str):
         self._eh_failed += 1

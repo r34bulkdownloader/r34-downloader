@@ -24,7 +24,7 @@ VIDEO_WAIT_MS = 30_000  # a video that hasn't started loading by then is skipped
 
 class _Relay(QObject):
     """Lives for the whole run, so decode threads never emit on a slideshow window that's being deleted."""
-    decoded = Signal(int, int, object)  # show serial, post id, QImage or None
+    decoded = Signal(int, object, object)  # show serial, post id (e-hentai ids pass 32 bits), QImage or None
 
 
 _relay: _Relay | None = None
@@ -467,7 +467,7 @@ class Slideshow(FullscreenWindow):
             return
         if not ok:
             if self._is_current(post.id):
-                self._failed(f"Can't load #{post.id}: {msg}")
+                self._failed(f"Can't load {post.label}: {msg}")
             return
         if post.ext == "gif":
             self._ready(post.id, data)

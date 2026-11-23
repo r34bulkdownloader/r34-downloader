@@ -15,23 +15,9 @@ Plans after 1.0. Nothing here is promised or scheduled.
   - The rate limit applies per site.
 - Favorites already record `site: "rule34.xxx"`, so they need no migration.
 
-## Support for e-hentai.org (albums)
-- Works like the rest of the app, but its unit is an **album** (a "gallery") instead of a single post:
-  - **Search albums:** the same include/exclude tag boxes. E-hentai tags have namespaces (`artist:`, `parody:`,
-    `character:`, `female:`, `language:`...); the grid shows one cover thumbnail per album, with its page count.
-  - **Open an album:** a new tab with the album's pages as a thumbnail grid, using the same ticking, ◀/▶ steps,
-    fullscreen and slideshow as a search.
-  - **Download:** ticked pictures, or the whole album as a folder or ZIP, reusing the existing album download.
-- Underneath, it's a different kind of site from the boorus:
-  - There's a small official JSON API (`api.e-hentai.org`, "gdata") for album details and tags. Searching and the
-    page lists come from the normal HTML pages, so they have to be parsed and can break when the site changes.
-  - Each picture's full-size file is found through its own page, so an album costs one request per picture.
-    The site limits image views per account and IP ("image limits"), so downloads must be paced, and an album
-    download should warn when it's large.
-  - Some content is only on exhentai.org and needs a logged-in account (cookies); start with e-hentai.org only.
-  - Check the site's terms on automated downloading first, and keep requests slow and polite.
-- Builds on the "other boorus" work: site picker, per-site history and favorites, and the `{site}` filename token,
-  plus new tokens such as `{album}`, `{page}` and `{album_id}`.
+## exhentai.org
+- e-hentai.org support is done (1.2.0). exhentai.org (content only shown to logged-in accounts, on its own
+  domain) is not supported yet: it would reuse the e-hentai site with the login cookies sent to exhentai.org.
 
 ## Ideas
 - **Export and import favorites and settings:** one file you can back up or move to another computer.

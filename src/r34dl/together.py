@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
 from . import api
 from .models import Post
 from .grid import HoverPreview, ResultsModel
-from .viewer import ViewerTab
+from .sites.ehclient import CANCELLED
+from .viewer import ViewerTab, known, resolve_error
 from .widgets import MAX_THUMBS, VIDEO_EXT
 
 log = logging.getLogger(__name__)
@@ -38,8 +39,12 @@ class TogetherTab(QWidget):
 
     open_requested = Signal(object)  # Post
 
-    def __init__(self, posts: list[Post], nam: QNetworkAccessManager, per_row: int = 2):
+    def __init__(self, posts: list[Post], nam: QNetworkAccessManager, per_row: int = 2, resolve=None):
         super().__init__()
+        self._resolve = resolve or known
+        self._resolving = 0  # file addresses being looked up (they count towards MAX_THUMBS)
+        self._released = False
+        self._pumping = False
         self.model = ResultsModel(self)  # just these posts, in order (Previous/Next in single-post tabs)
         self.model.append(posts)
         self.model.exhausted = True
@@ -79,7 +84,7 @@ class TogetherTab(QWidget):
             cell.setAlignment(Qt.AlignCenter)
             cell.setMinimumHeight(60)
             cell.setCursor(Qt.PointingHandCursor)
-            cell.setToolTip(f"#{p.id} · click to open")
+            cell.setToolTip(f"{p.label} · click to open")
             cell.clicked.connect(lambda p=p: self.open_requested.emit(p))
             self.cells[p.id] = cell
         self._relayout()
@@ -93,17 +98,38 @@ class TogetherTab(QWidget):
         return post.sample_url or post.file_url  # medium-size copy is plenty side by side
 
     def _pump(self):
-        while len(self._replies) < MAX_THUMBS and self._queue:
-            post = self._queue.popleft()
-            url = self._url(post)
-            if not url:
-                self.cells[post.id].setText(f"#{post.id}")
-                continue
-            reply = self._nam.get(api.request(url))
-            self._replies.add(reply)
-            if post.ext == "gif":  # GIFs come whole: same size cap as hover previews
-                reply.downloadProgress.connect(lambda got, total, r=reply, p=post: self._check_size(r, p, got, total))
-            reply.finished.connect(lambda r=reply, p=post: self._done(r, p))
+        if self._pumping:
+            return  # a resolve answered at once, from inside this loop: the loop carries on (no deep recursion)
+        self._pumping = True
+        try:
+            while len(self._replies) + self._resolving < MAX_THUMBS and self._queue:
+                self._resolving += 1
+                self._resolve(self._queue.popleft(), self._resolved, alive=lambda: not self._released)
+        finally:
+            self._pumping = False
+
+    def _resolved(self, post: Post, err: str | None):
+        self._resolving -= 1
+        if self._released:
+            return
+        if err:
+            if err != CANCELLED:
+                self.cells[post.id].setText(f"{post.label}: {resolve_error(err)}")
+                self.cells[post.id].setWordWrap(True)
+        else:
+            self._get(post)
+        self._pump()
+
+    def _get(self, post: Post):
+        url = self._url(post)
+        if not url:
+            self.cells[post.id].setText(f"{post.label}")
+            return
+        reply = self._nam.get(api.request(url))
+        self._replies.add(reply)
+        if post.ext == "gif":  # GIFs come whole: same size cap as hover previews
+            reply.downloadProgress.connect(lambda got, total, r=reply, p=post: self._check_size(r, p, got, total))
+        reply.finished.connect(lambda r=reply, p=post: self._done(r, p))
 
     def _check_size(self, reply: QNetworkReply, post: Post, got: int, total: int):
         if reply in self._replies and max(got, total) > HoverPreview.GIF_MAX_BYTES:
@@ -111,7 +137,7 @@ class TogetherTab(QWidget):
             reply.finished.disconnect()
             reply.abort()
             reply.deleteLater()
-            self.cells[post.id].setText(f"#{post.id}: large GIF — click to open it")
+            self.cells[post.id].setText(f"{post.label}: large GIF — click to open it")
             self._pump()
 
     def _done(self, reply: QNetworkReply, post: Post):
@@ -123,7 +149,7 @@ class TogetherTab(QWidget):
         reply.deleteLater()
         cell = self.cells[post.id]
         if not ok:
-            cell.setText(f"#{post.id}: could not load")
+            cell.setText(f"{post.label}: could not load")
         elif post.ext == "gif":
             buf = QBuffer(self)
             buf.setData(data)
@@ -134,7 +160,7 @@ class TogetherTab(QWidget):
                 cell.setMovie(movie)
                 movie.start()
             else:
-                cell.setText(f"#{post.id}: could not decode")
+                cell.setText(f"{post.label}: could not decode")
         else:
             self._files[post.id] = data
         self._fit(post.id)
@@ -221,6 +247,7 @@ class TogetherTab(QWidget):
             movie.setPaused(True)
 
     def release(self):
+        self._released = True
         self._queue.clear()
         for reply in list(self._replies):
             reply.finished.disconnect()

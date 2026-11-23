@@ -186,6 +186,14 @@ class ThumbDelegate(QStyledItemDelegate):
         s = model.pixmap(post.id)
         if s is not None and not s.isNull():
             painter.drawPixmap(r.left() + (r.width() - s.width()) // 2, r.top() + (r.height() - s.height()) // 2, s)
+        if post.kind == "gallery":  # title strip along the bottom, under the ↓ / ♥ markers
+            tr = QRect(r.left(), r.bottom() - 29, r.width(), 30)
+            painter.fillRect(tr, QColor(0, 0, 0, 170))
+            painter.setPen(QColor(255, 255, 255))
+            painter.setFont(QFont(painter.font().family(), 9))
+            text = tr.adjusted(30, 0, -30, 0)
+            painter.drawText(text, Qt.AlignCenter, painter.fontMetrics().elidedText(
+                str(post.album.get("title", "")), Qt.ElideRight, text.width()))
         cb = checkbox_rect(r)
         painter.fillRect(cb, pal.color(QPalette.Base))
         painter.setPen(pal.color(QPalette.Text))
@@ -211,12 +219,16 @@ class ThumbDelegate(QStyledItemDelegate):
             painter.setPen(QColor(255, 255, 255))
             painter.setFont(QFont(painter.font().family(), 10, QFont.Bold))
             painter.drawText(fm, Qt.AlignCenter, "♥")
-        badge = "▶" if post.ext in VIDEO_EXT else "GIF" if post.ext == "gif" else ""
+        if post.kind == "gallery":
+            badge = f"{post.album.get('pages', '?')} p"
+        else:
+            badge = "▶" if post.ext in VIDEO_EXT else "GIF" if post.ext == "gif" else ""
         if badge:
-            br = QRect(r.right() - 36, r.top() + 4, 32, 18)
+            painter.setFont(QFont(painter.font().family(), 9, QFont.Bold))
+            w = max(32, painter.fontMetrics().horizontalAdvance(badge) + 10) if post.kind == "gallery" else 32
+            br = QRect(r.right() - w - 4, r.top() + 4, w, 18)
             painter.fillRect(br, QColor(0, 0, 0, 180))
             painter.setPen(QColor(255, 255, 255))
-            painter.setFont(QFont(painter.font().family(), 9, QFont.Bold))
             painter.drawText(br, Qt.AlignCenter, badge)
         painter.restore()
 

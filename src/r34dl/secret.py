@@ -79,5 +79,6 @@ def unlock(blob: dict, password: str) -> tuple[dict, Vault]:
         raise WrongPassword() from None
     except ValueError as e:  # bad nonce length or not JSON
         raise BadSecret(str(e)) from None
-    creds = {"user_id": str(creds.get("user_id", "")), "api_key": str(creds.get("api_key", ""))}
-    return creds, Vault(key, salt, n, r, p)
+    out = {"user_id": str(creds.get("user_id", "")), "api_key": str(creds.get("api_key", ""))}
+    out.update({k: str(creds[k]) for k in ("eh_member_id", "eh_pass_hash") if creds.get(k)})  # optional login
+    return out, Vault(key, salt, n, r, p)

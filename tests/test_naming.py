@@ -114,3 +114,15 @@ def test_index_token_and_album_template():
     t = album_template("{artist}/rule34_{id}")
     assert t == "{index}_rule34_{id}"
     assert render(t, make_post(), "", "007") == "007_rule34_12345"
+
+
+def test_eh_tokens():
+    p = Post(1, "", "", "", "", [], "", 0, 0, 0, site="e-hentai", kind="page",
+             album={"gid": 7, "title": "My / Book", "page": 4, "pages": 1200}, file_name="004.jpg")
+    assert render("{site}_{album}_{album_id}_{page}", p, "") == "e-hentai_My _ Book_7_0004"
+    assert target_path(Path("/d"), "ehentai_{album_id}_{page}", p, "").name == "ehentai_7_0004.jpg"
+
+
+def test_album_tokens_on_rule34_post_are_unknown():
+    assert render("{album}_{album_id}", make_post(), "") == "unknown_unknown"
+    assert render("{site}_{page}", make_post(), "") == "rule34.xxx_unknown"

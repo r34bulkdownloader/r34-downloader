@@ -27,13 +27,33 @@ class Post:
     height: int
     # tag -> (kind, post count); kind is one of TAG_KINDS. Empty if the site sent no type info.
     tag_info: dict[str, tuple[str, int]] = field(default_factory=dict)
+    site: str = "rule34.xxx"
+    kind: str = "post"  # "post" | "gallery" | "page" (the last two are e-hentai only)
+    page_url: str = ""  # the picture page, or the gallery page for a gallery
+    album: dict = field(default_factory=dict)  # gid, token, title, page, pages, category
+    file_name: str = ""  # name hint for ext while file_url is still empty
+
+    @property
+    def label(self) -> str:
+        if self.kind == "gallery":
+            return str(self.album.get("title", ""))[:40]
+        if self.kind == "page":
+            return f"{str(self.album.get('title', ''))[:30]} · p{self.album.get('page', '')}"
+        return f"#{self.id}"
 
     def to_dict(self) -> dict:
         """Everything needed to show and re-download the post later without searching again."""
-        return {"site": "rule34.xxx", "id": self.id, "hash": self.hash, "file_url": self.file_url,
-                "preview_url": self.preview_url, "sample_url": self.sample_url, "tags": self.tags,
-                "rating": self.rating, "score": self.score, "width": self.width, "height": self.height,
-                "tag_info": {t: [k, c] for t, (k, c) in self.tag_info.items()}}
+        d = {"site": self.site, "id": self.id, "hash": self.hash, "file_url": self.file_url,
+             "preview_url": self.preview_url, "sample_url": self.sample_url, "tags": self.tags,
+             "rating": self.rating, "score": self.score, "width": self.width, "height": self.height,
+             "tag_info": {t: [k, c] for t, (k, c) in self.tag_info.items()}}
+        album = self.album
+        if self.site == "e-hentai":  # resolved picture addresses expire: found again from page_url when opened
+            del d["file_url"]
+            album = {k: v for k, v in album.items() if k not in ("shown", "original")}
+        extra = {"kind": self.kind, "page_url": self.page_url, "album": album, "file_name": self.file_name}
+        d.update({k: v for k, v in extra.items() if v and not (k == "kind" and v == "post")})
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Post":
@@ -41,12 +61,28 @@ class Post:
         only https links are accepted (a hand-edited file can't point the app at file:// or other schemes)."""
         def https(v) -> str:
             return v if isinstance(v, str) and v.startswith("https://") else ""
-        if not https(d["file_url"]):
+        site, kind = str(d.get("site", "rule34.xxx")), str(d.get("kind", "post"))
+        page_url = str(d.get("page_url", ""))
+        if kind == "post" and not https(d["file_url"]):
             raise ValueError("file_url must be https")
-        return cls(int(d["id"]), str(d["hash"]), d["file_url"], https(d.get("preview_url")),
+        if site == "e-hentai" and not page_url.startswith("https://e-hentai.org/"):
+            raise ValueError("page_url must be an e-hentai.org link")
+        if page_url and not https(page_url):  # open_in_browser opens it
+            raise ValueError("page_url must be https")
+        album = dict(d.get("album", {}))
+        if site == "e-hentai" and not (type(album.get("gid")) is int and isinstance(album.get("token"), str)):
+            raise ValueError("an e-hentai entry needs a numeric gid and a token")
+        if any(k in album and type(album[k]) is not int for k in ("page", "pages")):
+            raise ValueError("page numbers must be numbers")
+        return cls(int(d["id"]), str(d["hash"]), d["file_url"] if kind == "post" else https(d.get("file_url")),
+                   https(d.get("preview_url")),
                    https(d.get("sample_url")), [str(t) for t in d.get("tags", [])], str(d.get("rating", "")),
                    int(d.get("score", 0)), int(d.get("width", 0)), int(d.get("height", 0)),
-                   {str(t): (str(v[0]), int(v[1])) for t, v in dict(d.get("tag_info", {})).items()})
+                   {str(t): (str(v[0]), int(v[1])) for t, v in dict(d.get("tag_info", {})).items()},
+                   site, kind, page_url,
+                   # old favorites files kept resolved addresses; they expire, so they're found again when opened
+                   {k: v for k, v in album.items() if k not in ("shown", "original")},
+                   str(d.get("file_name", "")))
 
     def tags_of(self, kind: str) -> list[str]:
         return sorted(t for t, (k, _) in self.tag_info.items() if k == kind)
@@ -54,5 +90,7 @@ class Post:
     @property
     def ext(self) -> str:
         name = urlparse(self.file_url).path.rsplit("/", 1)[-1]
+        if "." not in name:
+            name = self.file_name
         ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
         return ext if re.fullmatch(r"[a-z0-9]{1,10}", ext) else "bin"

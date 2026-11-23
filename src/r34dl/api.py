@@ -18,7 +18,7 @@ RETRY_DELAYS_MS = (2000, 4000, 8000)
 
 log = logging.getLogger(__name__)
 
-_SECRET_RE = re.compile(r"(api_key|user_id)=[^&\s\"']*")
+_SECRET_RE = re.compile(r"(api_key|user_id|ipb_member_id|ipb_pass_hash)=[^&;\s\"']*")
 
 
 class ApiError(Exception):
@@ -60,6 +60,17 @@ def post_url(tags: str, pid: int, user_id: str, api_key: str) -> str:
     q = urlencode({"tags": tags, "limit": 100, "pid": pid, "user_id": user_id, "api_key": api_key,
                    "fields": "tag_info"})  # tag types and counts come with each post, no extra requests
     return f"{BASE}&{q}"
+
+
+def count_url(tags: str, user_id: str, api_key: str) -> str:
+    """The XML form of the same search with no posts: its <posts count="N"> is the total (JSON has no count)."""
+    q = urlencode({"tags": tags, "limit": 0, "user_id": user_id, "api_key": api_key})
+    return f"{BASE.removesuffix('&json=1')}&{q}"
+
+
+def parse_count(body: bytes) -> int | None:
+    m = re.search(rb'<posts\b[^>]*\bcount="(\d+)"', body)
+    return int(m.group(1)) if m else None
 
 
 AUTOCOMPLETE = "https://api.rule34.xxx/autocomplete.php"
@@ -158,6 +169,7 @@ def parse_page(body: bytes) -> tuple[list[Post], int]:
 class ApiClient(QObject):
     page_ready = Signal(int, list, int)
     failed = Signal(int, str)
+    counted = Signal(int, object)  # generation, total posts
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -181,6 +193,17 @@ class ApiClient(QObject):
             self._timer.stop()
             return
         self._send(*self._queue.popleft())
+
+    def count(self, tags: str, generation: int, user_id: str, api_key: str) -> None:
+        """Total posts for a search, as counted(gen, n). Best effort: any failure just leaves it unknown."""
+        reply = self._nam.get(request(count_url(tags, user_id, api_key)))
+
+        def done():
+            reply.deleteLater()
+            n = parse_count(bytes(reply.readAll())) if reply.error() == QNetworkReply.NoError else None
+            if n is not None:
+                self.counted.emit(generation, n)
+        reply.finished.connect(done)
 
     def _send(self, url: str, gen: int, attempt: int) -> None:
         reply = self._nam.get(request(url))

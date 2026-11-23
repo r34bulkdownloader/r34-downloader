@@ -1,5 +1,8 @@
 """Windows: unlock (master password), log viewer, Settings."""
+import copy
 import logging
+import re
+from pathlib import Path
 
 from PySide6.QtCore import (
     Qt, QTimer, QUrl,
@@ -21,7 +24,7 @@ from .widgets import TagEdit, expand_dir, hint_label
 log = logging.getLogger(__name__)
 
 class UnlockDialog(QDialog):
-    """Startup: ask for the password that protects the User ID and API key."""
+    """Startup: ask for the password that protects the User ID, API key and e-hentai login."""
 
     FORGOT = 2  # exec() result: the user gave up on the password
 
@@ -32,7 +35,7 @@ class UnlockDialog(QDialog):
         self.creds: dict | None = None
         self.vault: secret.Vault | None = None
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Enter your password to unlock your User ID and API key."))
+        lay.addWidget(QLabel("Enter your password to unlock your User ID, API key and e-hentai login."))
         self.pw = QLineEdit()
         self.pw.setEchoMode(QLineEdit.Password)
         lay.addWidget(self.pw)
@@ -63,7 +66,7 @@ class UnlockDialog(QDialog):
             return
         except secret.BadSecret:
             self.msg.setText("The saved key can't be read (damaged or from another version). "
-                             "Use “Forgot password?” to enter your User ID and API key again.")
+                             "Use “Forgot password?” to enter your User ID, API key and e-hentai login again.")
             self.msg.setWordWrap(True)
             return
         self.pw.clear()  # don't keep the password text around
@@ -72,9 +75,11 @@ class UnlockDialog(QDialog):
     def _forgot(self):
         r = QMessageBox.question(
             self, "Forgot password",
-            "Your password can't be recovered. You can remove the protected User ID and API key and enter them "
-            "again (they're on your rule34.xxx account's Options page under API Access Credentials).\n\n"
-            "Only the saved User ID and API key are removed — searches, favorites and history stay.\n\n"
+            "Your password can't be recovered. You can remove the protected User ID, API key and e-hentai login and "
+            "enter them again (the first two are on your rule34.xxx account's Options page under API Access "
+            "Credentials, the e-hentai login in your browser's e-hentai.org cookies).\n\n"
+            "Only the saved User ID, API key and e-hentai login are removed — searches, favorites and history "
+            "stay.\n\n"
             "Remove them now?")
         if r == QMessageBox.Yes:
             self.done(self.FORGOT)
@@ -128,7 +133,8 @@ KOFI_URL = "https://ko-fi.com/r34bulkdownloader"
 
 class SettingsDialog(QDialog):
     def __init__(self, cfg: dict, sample: Post | None, search: str = "", parent=None,
-                 nam: QNetworkAccessManager | None = None, vault: "secret.Vault | None" = None):
+                 nam: QNetworkAccessManager | None = None, vault: "secret.Vault | None" = None,
+                 sites: list[str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.vault = vault  # the unlocked password this session (secret.Vault); None = not protected/unlocked
@@ -136,7 +142,7 @@ class SettingsDialog(QDialog):
         self._was_protected = bool(cfg.get("secret"))
         self._changing_password = False
         self._nam = nam or QNetworkAccessManager(self)
-        self._cfg = dict(cfg)
+        self._cfg = copy.deepcopy(cfg)  # Cancel or a failed save leaves the caller's settings as they were
         self._search = search
         self._sample = sample or Post(
             12345, "0123456789abcdef0123456789abcdef", "https://example.invalid/img/a.jpg", "", "",
@@ -144,6 +150,9 @@ class SettingsDialog(QDialog):
             tag_info={"some_artist": ("artist", 1), "some_character": ("character", 1),
                       "some_series": ("copyright", 1), "tag_one": ("general", 1)},
         )
+        self._eh_sample = Post(
+            700001004, "", "", "", "", [], "", 0, 0, 0, site="e-hentai", kind="page", file_name="004.jpg",
+            album={"gid": 7, "token": "", "title": "Some Album", "page": 4, "pages": 120, "category": ""})
         outer = QVBoxLayout(self)
 
         account = QGroupBox("Account")
@@ -173,7 +182,7 @@ class SettingsDialog(QDialog):
             'Log in on rule34.xxx, open <a href="https://rule34.xxx/index.php?page=account&s=options">'
             "My Account → Options</a>, copy the whole line under <b>API Access Credentials</b> (it starts with "
             "<b>&amp;api_key=</b>) and paste it in the first box. They are saved only on this computer.", links=True))
-        self.protect_check = QCheckBox("Protect my User ID and API key with a password")
+        self.protect_check = QCheckBox("Protect my User ID, API key and e-hentai login with a password")
         self.protect_check.setChecked(self._was_protected)
         self.protect_check.toggled.connect(self._update_password_rows)
         self.change_pw_btn = QPushButton("Change password…")
@@ -193,12 +202,32 @@ class SettingsDialog(QDialog):
         form.addRow("Repeat new password", self.new_pw2)
         self.pw_hint = hint_label(
             "The app will ask for this password when it starts. <b>If you forget it, it can't be recovered</b> — "
-            "you'd just enter your User ID and API key again (they're always on your rule34.xxx Options page). "
-            "Nothing else is lost.")
+            "you'd just enter your User ID and API key again (they're always on your rule34.xxx Options page) and "
+            "your e-hentai login, which is lost too (copy its cookies from your browser again). Nothing else is lost.")
         form.addRow(self.pw_hint)
         self._account_form = form
         self._update_password_rows()
         outer.addWidget(account)
+
+        eh = QGroupBox("e-hentai login (optional)")
+        form = QFormLayout(eh)
+        sc = config.site_cfg(self._cfg, "e-hentai")
+        self.eh_member_edit = QLineEdit(sc["member_id"])
+        self.eh_hash_edit = QLineEdit(sc["pass_hash"])
+        self.eh_hash_edit.setEchoMode(QLineEdit.Password)
+        show = QCheckBox("Show")
+        show.toggled.connect(lambda on: self.eh_hash_edit.setEchoMode(QLineEdit.Normal if on else QLineEdit.Password))
+        hash_row = QHBoxLayout()
+        hash_row.addWidget(self.eh_hash_edit, 1)
+        hash_row.addWidget(show)
+        form.addRow("Member ID", self.eh_member_edit)
+        form.addRow("Pass hash", hash_row)
+        form.addRow(hint_label(
+            "Needed only for downloading original-size pictures. Log in on e-hentai.org in your browser, open its "
+            "developer tools (F12) → <b>Storage</b> (Firefox) or <b>Application</b> (Chrome) → <b>Cookies</b>, and "
+            "copy the values of <b>ipb_member_id</b> and <b>ipb_pass_hash</b>. They are saved only on this "
+            "computer and can be protected with the password above."))
+        outer.addWidget(eh)
 
         downloads = QGroupBox("Downloads")
         form = QFormLayout(downloads)
@@ -209,10 +238,17 @@ class SettingsDialog(QDialog):
         dir_row.addWidget(self.dir_edit, 1)
         dir_row.addWidget(browse)
         form.addRow("Save folder", dir_row)
-        self.template_edit = QLineEdit(cfg["template"])
-        reset = QPushButton("Default")
-        reset.setToolTip(f"Reset to {config.DEFAULTS['template']}")
-        reset.clicked.connect(lambda: self.template_edit.setText(config.DEFAULTS["template"]))
+        self.site_box = QComboBox()
+        for name in sites or ["rule34.xxx", *config.SITE_DEFAULTS]:
+            self.site_box.addItem(name, name)
+        form.addRow("Site", self.site_box)
+        self._site = self.site_box.currentData()
+        self._templates = {}  # site -> template text, so switching sites keeps each one's edits
+        self.template_edit = QLineEdit(config.site_cfg(self._cfg, self._site)["template"])
+        self.reset_btn = reset = QPushButton("Default")
+        reset.clicked.connect(lambda: self.template_edit.setText(self._default_template()))
+        reset.setToolTip(f"Reset to {self._default_template()}")
+        self.site_box.currentIndexChanged.connect(self._site_changed)
         tpl_row = QHBoxLayout()
         tpl_row.addWidget(self.template_edit, 1)
         tpl_row.addWidget(reset)
@@ -221,7 +257,8 @@ class SettingsDialog(QDialog):
             "Build the name from these pieces: <b>{id}</b> post number · <b>{hash}</b> · <b>{tags}</b> all tags · "
             "<b>{tags:5}</b> first 5 tags · <b>{artist}</b> · <b>{character}</b> · <b>{copyright}</b> · "
             "<b>{rating}</b> · <b>{score}</b> · <b>{width}</b> · <b>{height}</b> · <b>{search}</b> your include tags · "
-            "<b>{index}</b> position in the download (001, 002…). A <b>/</b> makes a subfolder, e.g. <b>{rating}/{id}</b>. "
+            "<b>{index}</b> position in the download (001, 002…) · <b>{site}</b> · <b>{album}</b> album title · "
+            "<b>{album_id}</b> · <b>{page}</b> page number (e-hentai). A <b>/</b> makes a subfolder, e.g. <b>{rating}/{id}</b>. "
             "The file extension is added for you."))
         self.preview = QLabel()
         self.preview.setWordWrap(True)
@@ -233,13 +270,24 @@ class SettingsDialog(QDialog):
 
         blacklist = QGroupBox("Blacklist")
         bll = QVBoxLayout(blacklist)
-        self.blacklist_edit = TagEdit(self._nam)
-        self.blacklist_edit.setPlainText(cfg.get("blacklist", ""))
+        self.bl_site_box = QComboBox()
+        for name in sites or ["rule34.xxx", *config.SITE_DEFAULTS]:
+            self.bl_site_box.addItem(name, name)
+        bl_row = QHBoxLayout()
+        bl_row.addWidget(QLabel("Site"))
+        bl_row.addWidget(self.bl_site_box, 1)
+        bll.addLayout(bl_row)
+        self._bl_site = self.bl_site_box.currentData()
+        self._blacklists = {}  # site -> blacklist text, so switching sites keeps each one's edits
+        site_of = getattr(parent, "site", None)  # the window's Site objects give each site's suggestions
+        self.blacklist_edit = TagEdit(self._nam, (lambda: site_of(self._bl_site)) if site_of else None)
+        self.blacklist_edit.setPlainText(config.site_cfg(self._cfg, self._bl_site)["blacklist"])
+        self.bl_site_box.currentIndexChanged.connect(self._bl_site_changed)
         self.blacklist_edit.setPlaceholderText("for example:\nai_generated\nscat")
         self.blacklist_edit.setFixedHeight(80)
         bll.addWidget(self.blacklist_edit)
         bll.addWidget(hint_label(
-            "Posts with any of these tags are never shown, in every search tab. Same rules as the tag boxes. "
+            "Posts with any of these tags are never shown, in every search tab on that site. Same rules as the tag boxes. "
             "A blacklisted tag you put in a search's Include box is allowed for that search."))
         outer.addWidget(blacklist)
 
@@ -348,7 +396,9 @@ class SettingsDialog(QDialog):
     def _apply_protection(self) -> bool:
         """Encrypt / re-encrypt / unprotect the credentials in self._cfg. False = stay in the dialog."""
         protect, was = self.protect_check.isChecked(), self._was_protected
-        creds = {"user_id": self._cfg["user_id"], "api_key": self._cfg["api_key"]}
+        sc = config.site_cfg(self._cfg, "e-hentai")
+        creds = {"user_id": self._cfg["user_id"], "api_key": self._cfg["api_key"],
+                 "eh_member_id": sc["member_id"], "eh_pass_hash": sc["pass_hash"]}
         if was and (not protect or self._changing_password):  # turning off or changing: prove it's you
             try:
                 secret.unlock(self._cfg["secret"], self.cur_pw.text())
@@ -386,10 +436,42 @@ class SettingsDialog(QDialog):
         if d:
             self.dir_edit.setText(d)
 
+    def _default_template(self) -> str:
+        return config.DEFAULTS["template"] if self._site == "rule34.xxx" else config.SITE_DEFAULTS[self._site]["template"]
+
+    def _store_template(self):
+        self._templates[self._site] = self.template_edit.text()
+
+    def _site_changed(self):
+        self._store_template()
+        self._site = self.site_box.currentData()
+        text = self._templates.get(self._site) or config.site_cfg(self._cfg, self._site)["template"]
+        self.reset_btn.setToolTip(f"Reset to {self._default_template()}")
+        self.template_edit.setText(text)
+        self._update_preview()
+
+    def _bl_site_changed(self):
+        self._blacklists[self._bl_site] = self.blacklist_edit.toPlainText()
+        self._bl_site = self.bl_site_box.currentData()
+        self.blacklist_edit.setPlainText(
+            self._blacklists.get(self._bl_site, config.site_cfg(self._cfg, self._bl_site)["blacklist"]))
+
+    def _sample_for(self, site: str) -> Post:
+        return self._sample if site == "rule34.xxx" else self._eh_sample
+
+    def _bad_site(self) -> str | None:
+        """The first site whose stored template doesn't render, or None."""
+        for site, text in self._templates.items():
+            try:
+                naming.target_path(Path("."), text, self._sample_for(site), self._search)
+            except ValueError:
+                return site
+        return None
+
     def _update_preview(self):
         try:
             base = expand_dir(self.dir_edit.text().strip() or ".")
-            path = naming.target_path(base, self.template_edit.text(), self._sample, self._search)
+            path = naming.target_path(base, self.template_edit.text(), self._sample_for(self._site), self._search)
             self.preview.setStyleSheet("")
             self.preview.setText(str(path.relative_to(base)))
             ok = True
@@ -400,12 +482,33 @@ class SettingsDialog(QDialog):
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(ok)
 
     def accept(self):
+        self._store_template()
+        if (bad := self._bad_site()) is not None:
+            self.site_box.setCurrentIndex(self.site_box.findData(bad))  # shows its error in the preview
+            QMessageBox.warning(self, "Bad filename template", f"The file name for {bad} is not valid.")
+            return
+        eh_login = self.eh_member_edit.text().strip(), self.eh_hash_edit.text().strip()
+        if not all(re.fullmatch(r"[\w-]*", v) for v in eh_login):  # cookie values: no spaces or ; (ehclient)
+            QMessageBox.warning(self, "e-hentai login", "The Member ID and Pass hash are made of letters, digits, "
+                                "- and _ only. Copy just the cookie values.")
+            return
+        if all(eh_login) != any(eh_login):
+            QMessageBox.warning(self, "e-hentai login", "Fill in both the Member ID and the Pass hash, or leave both "
+                                "empty.")
+            return
+        config.site_cfg(self._cfg, "e-hentai").update(member_id=eh_login[0], pass_hash=eh_login[1])
+        self._blacklists[self._bl_site] = self.blacklist_edit.toPlainText()
+        for site, text in self._blacklists.items():
+            config.site_cfg(self._cfg, site)["blacklist"] = text
+        for site, text in self._templates.items():
+            if site != "rule34.xxx":
+                config.site_cfg(self._cfg, site)["template"] = text
         self._cfg.update(
             user_id=self.user_edit.text().strip(), api_key=self.key_edit.text().strip(),
             save_dir=str(expand_dir(self.dir_edit.text().strip() or self._cfg["save_dir"])),
-            template=self.template_edit.text(), start_muted=self.muted_check.isChecked(), loop_videos=self.loop_check.isChecked(),
+            template=self._templates.get("rule34.xxx", self._cfg["template"]), start_muted=self.muted_check.isChecked(), loop_videos=self.loop_check.isChecked(),
             remember_include=self.remember_check.isChecked(), hide_downloaded=self.hide_check.isChecked(),
-            blacklist=self.blacklist_edit.toPlainText(), infinite_scroll=self.infinite_check.isChecked(),
+            infinite_scroll=self.infinite_check.isChecked(),
             theme=self.theme_box.currentData(), hover_preview=self.hover_check.isChecked(),
         )
         if not self._apply_protection():

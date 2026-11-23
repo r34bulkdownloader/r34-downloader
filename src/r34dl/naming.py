@@ -39,6 +39,15 @@ def _segments(template: str, post: Post, search: str, tags_cap: int | None, inde
             raise ValueError(f"unexpected format spec on {{{field}}}")
         elif field in _KINDS:
             value = "+".join(_clean(t) for t in post.tags_of(field)) or "unknown"
+        elif field == "site":
+            value = _clean(post.site)
+        elif field == "album":
+            value = _clean(str(post.album.get("title", ""))) or "unknown"
+        elif field == "album_id":
+            value = _clean(str(post.album.get("gid", ""))) or "unknown"
+        elif field == "page":
+            n = post.album.get("page")
+            value = str(n).zfill(max(3, len(str(post.album.get("pages", ""))))) if n else "unknown"
         elif field == "index":
             value = index  # position in the download batch, zero-padded (e.g. 007)
         elif field == "search":

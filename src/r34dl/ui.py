@@ -1,5 +1,6 @@
 """The main window: tabs, toolbar, downloads (incl. albums/ZIPs), favorites and followed tags."""
 import logging
+import math
 import shutil
 import tempfile
 import threading
@@ -24,11 +25,14 @@ from . import api, config, naming, secret, theme
 from .downloader import Downloader
 from .models import Post
 from .dialogs import SettingsDialog, UnlockDialog
+from .gallery import GalleryTab
 from .grid import ResultsModel
 from .search import FavoritesTab, SearchTab
+from .sites import Site, make_sites
+from .sites.ehclient import EH_GAP_MS, EH_WARN_PICTURES, EhDownloadFeeder
 from .slideshow import Slideshow, SlideshowDialog
 from .together import TogetherTab
-from .viewer import ViewerTab
+from .viewer import ViewerTab, resolve_error
 from .widgets import PIXMAP_CACHE_KB, THUMB_MAX, THUMB_MIN, THUMB_STEP, expand_dir, snap_thumb
 
 log = logging.getLogger(__name__)
@@ -75,24 +79,44 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
         self.cfg = config.load()
         theme.apply(self.cfg["theme"])
-        self.downloaded: set[int] = config.load_history()  # shared by every search tab's model
-        self.favorites: dict[int, Post] = {}  # newest first; shared by every search tab's model
-        self._load_favorites(config.load_favorites())
-        self._url_ids: dict[str, int] = {}  # queued file url -> post id, for the history
+        self.sites: dict[str, Site] = make_sites(self)
+        self.api = self.sites["rule34.xxx"].api
+        # per site, shared by every search tab's model on that site
+        self.downloaded: dict[str, set[int]] = {s: config.load_history(s) for s in self.sites}
+        self.favorites: dict[str, dict[int, Post]] = {s: {} for s in self.sites}  # newest first
+        for s in self.sites:
+            self._load_favorites(config.load_favorites(s), s)
+        self._url_ids: dict[str, tuple[str, int]] = {}  # queued file url -> (site, post id), for the history
+        self._target_ids: dict[str, tuple[str, int]] = {}  # same for e-hentai pages (url known only later)
         self._zip_jobs: list[_ZipJob] = []
+        self._cancels = 0  # bumped by Cancel: gallery listings started before it are dropped
+        self._listings: list = []  # stop() of each gallery listing in progress (for Cancel)
+        self._eh_failed = 0  # e-hentai pictures that couldn't be resolved (the downloader never saw them)
+        self._last_progress = (0, 0, 0, 0)
         self._zip_threads: list[threading.Thread] = []  # ZIPs being packed in the background
         self.zip_written.connect(self._on_zip_written)
         self.slideshow: Slideshow | None = None  # the running one (one at a time)
-        self.api = api.ApiClient(self)
         self.downloader = Downloader(self)
+        self.feeder = EhDownloadFeeder(self.sites["e-hentai"], self.downloader, self)
+        self.feeder.paused.connect(self._on_eh_paused)
+        self.feeder.failed.connect(self._on_eh_failed)
+        self.feeder.retargeted.connect(self._on_eh_retargeted)
+        self.feeder.originals_refused.connect(lambda: self.statusBar().showMessage(
+            "e-hentai refused an original picture, so resized copies are downloaded instead. "
+            "Check the e-hentai login in Settings.", 30000))
         self.nam = QNetworkAccessManager(self)
         self._build_ui()
         self.downloader.progress.connect(self._on_progress)
         self.downloader.item_done.connect(self._on_item_done)
         self.downloader.item_done.connect(self._album_progress)
         self._vault: secret.Vault | None = None  # unlocked password key (never written anywhere)
+        self._eh_login()
         if self.cfg["secret"] or not self.cfg["user_id"] or not self.cfg["api_key"]:
             QTimer.singleShot(0, self, self._startup)
+
+    def _eh_login(self):
+        sc = config.site_cfg(self.cfg, "e-hentai")
+        self.sites["e-hentai"].queue.set_login(sc["member_id"], sc["pass_hash"])
 
     def _startup(self):
         """Unlock protected credentials first; ask for credentials if there are none. Runs once."""
@@ -104,11 +128,16 @@ class MainWindow(QMainWindow):
             r = dlg.exec()
             creds, vault = dlg.creds, dlg.vault
             dlg.deleteLater()
-            if r == QDialog.Accepted:
-                self.cfg.update(creds)  # in memory only
+            if r == QDialog.Accepted:  # in memory only
+                config.site_cfg(self.cfg, "e-hentai").update(member_id=creds.pop("eh_member_id", ""),
+                                                             pass_hash=creds.pop("eh_pass_hash", ""))
+                self.cfg.update(creds)
                 self._vault = vault
+                self._eh_login()
             elif r == UnlockDialog.FORGOT:
                 self.cfg.update(secret={}, user_id="", api_key="")
+                config.site_cfg(self.cfg, "e-hentai").update(member_id="", pass_hash="")
+                self._eh_login()
                 try:
                     config.save(self.cfg, unprotect=True)
                 except OSError as e:
@@ -163,8 +192,9 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.setCentralWidget(self.tabs)
-        include = self.cfg["include"] if self.cfg["remember_include"] else ""
-        self.first = SearchTab(self, include, self.cfg["exclude"])
+        site = self.cfg["site"] if self.cfg["site"] in self.sites else "rule34.xxx"
+        include = config.site_cfg(self.cfg, site)["include"] if self.cfg["remember_include"] else ""
+        self.first = SearchTab(self, include, config.site_cfg(self.cfg, site)["exclude"], site)
         self.tabs.addTab(self.first, "Search")
         self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.RightSide, None)
         self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.LeftSide, None)
@@ -175,13 +205,19 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximumWidth(260)
         self.progress_label = QLabel("Downloads: idle")
         self.retry_btn = QPushButton("Retry failed")
-        self.retry_btn.clicked.connect(self.downloader.retry_failed)
+        self.retry_btn.clicked.connect(self._retry_failed)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self.cancel_downloads)
-        for w in (self.progress_bar, self.progress_label, self.retry_btn, self.cancel_btn):
+        self.resume_btn = QPushButton("Resume e-hentai downloads")
+        self.resume_btn.clicked.connect(self._resume_eh)
+        self.resume_btn.hide()
+        for w in (self.progress_bar, self.progress_label, self.retry_btn, self.cancel_btn, self.resume_btn):
             sb.addWidget(w)
 
     # ---- tabs
+    def site(self, name: str) -> Site:
+        return self.sites[name]
+
     def search_tabs(self) -> list[SearchTab]:
         return [w for w in map(self.tabs.widget, range(self.tabs.count())) if isinstance(w, SearchTab)]
 
@@ -190,9 +226,9 @@ class MainWindow(QMainWindow):
         return w if isinstance(w, SearchTab) else self.first
 
     def current_site_search(self) -> SearchTab:
-        """The search tab showing, but never Favorites (saved searches are site searches)."""
+        """The search tab showing, but never Favorites or a gallery (saved searches are site searches)."""
         w = self.current_search()
-        return self.first if isinstance(w, FavoritesTab) else w
+        return self.first if isinstance(w, (FavoritesTab, GalleryTab)) else w
 
     def set_tab_title(self, tab: QWidget, title: str):
         i = self.tabs.indexOf(tab)
@@ -200,9 +236,14 @@ class MainWindow(QMainWindow):
             self.tabs.setTabText(i, title)
             self.tabs.setTabToolTip(i, title)
 
-    def open_search_tab(self, include: str = "", background: bool = False, focus: bool = False) -> SearchTab:
-        """New search tab; starts with the remembered exclude list. Searches right away if given tags."""
-        tab = SearchTab(self, include, self.first.exclude_edit.toPlainText())
+    def open_search_tab(self, include: str = "", background: bool = False, focus: bool = False,
+                        site: str | None = None) -> SearchTab:
+        """New search tab (on the site used last unless given); starts with the remembered exclude list.
+        Searches right away if given tags."""
+        site = site or (self.cfg["site"] if self.cfg["site"] in self.sites else self.first.site.name)
+        exclude = (self.first.exclude_edit.toPlainText() if site == self.first.site.name
+                   else config.site_cfg(self.cfg, site)["exclude"])
+        tab = SearchTab(self, include, exclude, site)
         i = self.tabs.addTab(tab, tab.title())
         if not background:
             self.tabs.setCurrentIndex(i)
@@ -212,13 +253,26 @@ class MainWindow(QMainWindow):
             tab.include_edit.setFocus()
         return tab
 
+    def open_gallery(self, gallery: Post, background: bool) -> GalleryTab:
+        tab = GalleryTab(self, gallery)
+        i = self.tabs.addTab(tab, tab.title())
+        if not background:
+            self.tabs.setCurrentIndex(i)
+        tab.search()
+        return tab
+
+    def resolve(self, post: Post, cb, alive=None):
+        """Find the post's file address for viewing, then cb(post, error or None); alive() as in Site.resolve."""
+        self.sites[post.site].resolve(post, False, cb, alive)
+
     def open_viewer(self, post: Post, background: bool, origin: SearchTab | None = None,
                     model: ResultsModel | None = None):
         """model: step through these posts instead of a search's results (a Together tab's selection)."""
         if model is None:
             origin = origin or self.current_search()
             model = origin.model
-        tab = ViewerTab(post, model, self.nam, start_muted=self.cfg["start_muted"], loop=self.cfg["loop_videos"])
+        tab = ViewerTab(post, model, self.nam, start_muted=self.cfg["start_muted"], loop=self.cfg["loop_videos"],
+                        resolve=self.resolve)
         tab.origin = origin
         tab.title_changed.connect(lambda t: self.set_tab_title(tab, t))
         if origin is not None:
@@ -228,12 +282,12 @@ class MainWindow(QMainWindow):
         tab._update_nav()
         search = origin._include if origin else ""  # the post's search, even if that tab searches again later
         tab.download_requested.connect(lambda p: self.download_posts([p], search))
-        tab.is_favorite = lambda pid: pid in self.favorites
-        tab.is_followed = self.is_followed
+        tab.is_favorite = lambda pid: pid in self.favorites[tab.post.site]  # the post shown now
+        tab.is_followed = lambda tag: self.is_followed(tag, tab.post.site)
         tab.update_favorite()
         tab.favorite_toggled.connect(self.toggle_favorite)
         tab.tag_action.connect(lambda action, tag: self._tag_action(tab.origin, action, tag))
-        i = self.tabs.addTab(tab, f"#{post.id}")
+        i = self.tabs.addTab(tab, post.label)
         if not background:
             self.tabs.setCurrentIndex(i)
 
@@ -252,9 +306,9 @@ class MainWindow(QMainWindow):
         if self.slideshow is not None:
             self.slideshow.close()
         show = self.slideshow = Slideshow(ticked if only else list(tab.model.posts), self.nam, opts,
-                                          origin=None if only else tab)
-        search = tab._include
-        show.is_favorite = lambda pid: pid in self.favorites
+                                          origin=None if only else tab, resolve=self.resolve)
+        search, site = tab._include, tab.site.name  # the tab may switch site while the show runs
+        show.is_favorite = lambda pid: pid in self.favorites[site]
         show.favorite_toggled.connect(self.toggle_favorite)
         show.download_requested.connect(lambda p: self.download_posts([p], search))
         show.on_close = self._slideshow_closed
@@ -267,19 +321,22 @@ class MainWindow(QMainWindow):
     def open_together(self, posts: list[Post]):
         if len(posts) < 2:
             return
-        tab = TogetherTab(posts, self.nam)
+        tab = TogetherTab(posts, self.nam, resolve=self.resolve)
         tab.open_requested.connect(lambda p: self.open_viewer(p, False, None, tab.model))
         self.tabs.setCurrentIndex(self.tabs.addTab(tab, f"Together ({len(posts)})"))
 
     def _tag_action(self, origin: SearchTab, action: str, tag: str):
+        target = origin if origin is not None else self.first  # origin is None once its tab closed
+        site = target.site.name
         if action in ("search", "search_bg"):
-            self.open_search_tab(tag, background=action == "search_bg")
+            self.open_search_tab(tag, background=action == "search_bg", site=site)
         elif action == "follow":
-            self.follow_tag(tag)
+            self.follow_tag(tag, site)
         elif action == "unfollow":
-            self.unfollow_tag(tag)
+            self.unfollow_tag(tag, site)
         elif action in ("include", "exclude"):
-            target = origin if origin is not None else self.first  # origin is None once its tab closed
+            if isinstance(target, GalleryTab):  # its tag boxes are hidden: use a search tab on that site
+                target = self.first if self.first.site.name == site else self.open_search_tab(site=site)
             target.add_tag(action, tag)
 
     def _close_tab(self, i: int):
@@ -327,9 +384,10 @@ class MainWindow(QMainWindow):
             return False
 
     def _store_tags(self):
-        """Remember the first tab's tags (include only if the user wants it remembered)."""
-        self.cfg["exclude"] = self.first.exclude_edit.toPlainText()
-        self.cfg["include"] = self.first.include_edit.toPlainText() if self.cfg["remember_include"] else ""
+        """Remember the first tab's tags (include only if the user wants it remembered), for its site."""
+        sc = config.site_cfg(self.cfg, self.first.site.name)
+        sc["exclude"] = self.first.exclude_edit.toPlainText()
+        sc["include"] = self.first.include_edit.toPlainText() if self.cfg["remember_include"] else ""
 
     def search_started(self, tab: SearchTab):
         if tab is self.first:
@@ -340,43 +398,47 @@ class MainWindow(QMainWindow):
         self._store_tags()
         cur = self.current_search()
         dlg = SettingsDialog(self.cfg, cur.model.posts[0] if cur.model.posts else None, cur._include, self, self.nam,
-                             self._vault)
+                             self._vault, list(self.sites))
         accepted = dlg.exec() == QDialog.Accepted
         dlg.deleteLater()  # its password fields go with it
         if accepted:
             self.cfg = dlg.result_cfg()  # not config.load(): protected credentials are only in memory
             self._vault = dlg.vault
+            self._eh_login()
             self._refresh_settings_labels()
             for tab in self.search_tabs():
                 if isinstance(tab, FavoritesTab):
                     tab.search()  # the blacklist may have changed
-        self.downloaded.clear()  # the dialog may have cleared the history; refill the shared set in place
-        self.downloaded.update(config.load_history())
+        for site, ids in self.downloaded.items():  # the dialog may have cleared the history; refill in place
+            ids.clear()
+            ids.update(config.load_history(site))
         for tab in self.search_tabs():
             tab.view.viewport().update()
 
     # ---- followed tags
-    def is_followed(self, tag: str) -> bool:
-        return tag.lower() in {t.lower() for t in self.cfg["followed"]}
+    def is_followed(self, tag: str, site: str = "rule34.xxx") -> bool:
+        return tag.lower() in {t.lower() for t in config.site_cfg(self.cfg, site)["followed"]}
 
-    def follow_tag(self, tag: str):
+    def follow_tag(self, tag: str, site: str = "rule34.xxx"):
         tag = tag.strip().lstrip("-")
-        if tag and not self.is_followed(tag):
-            self.cfg["followed"].append(tag)
+        if tag and not self.is_followed(tag, site):
+            config.site_cfg(self.cfg, site)["followed"].append(tag)
             self._save_cfg()
             self.statusBar().showMessage(f"Following {tag} — find it under ★ Searches", 8000)
 
-    def unfollow_tag(self, tag: str):
-        keep = [t for t in self.cfg["followed"] if t.lower() != tag.lower()]
-        if len(keep) != len(self.cfg["followed"]):
-            self.cfg["followed"] = keep
+    def unfollow_tag(self, tag: str, site: str = "rule34.xxx"):
+        sc = config.site_cfg(self.cfg, site)
+        keep = [t for t in sc["followed"] if t.lower() != tag.lower()]
+        if len(keep) != len(sc["followed"]):
+            sc["followed"] = keep
             self._save_cfg()
 
     def ask_follow_tag(self):
+        site = self.current_site_search().site
         tag, ok = QInputDialog.getText(self, "Follow a tag", "Tag to follow (use _ instead of spaces):")
-        tags = api.split_tags(tag)
+        tags = site.split_tags(tag)
         if ok and len(tags) == 1:
-            self.follow_tag(tags[0])
+            self.follow_tag(tags[0], site.name)
         elif ok and tags:
             QMessageBox.information(self, "Follow a tag", "Please enter one tag. To follow a combination of tags, "
                                     "use ★ Searches → Save current search… instead.")
@@ -391,32 +453,34 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(self.tabs.addTab(tab, tab.title()))
         tab.search()
 
-    def _load_favorites(self, entries: list[dict]):
-        """Refill the shared favorites dict in place (every model holds this same object)."""
+    def _load_favorites(self, entries: list[dict], site: str):
+        """Refill the site's shared favorites dict in place (every model on that site holds this same object)."""
         posts = {}
         for d in entries:
             try:
                 p = Post.from_dict(d)
             except (KeyError, TypeError, ValueError):
                 continue  # kept in the file, just not shown
+            if p.site != site:
+                continue  # hand-edited into the wrong file: it would be looked up in the wrong dict
             posts.setdefault(p.id, p)
-        self.favorites.clear()
-        self.favorites.update(posts)
+        self.favorites[site].clear()
+        self.favorites[site].update(posts)
 
     def toggle_favorite(self, post: Post):
-        adding = post.id not in self.favorites
+        adding = post.id not in self.favorites[post.site]
         try:  # re-reads the file, so another window's changes are kept
             entries = config.update_favorites(add=post.to_dict() if adding else None,
-                                              remove_id=None if adding else post.id)
+                                              remove_id=None if adding else post.id, site=post.site)
         except OSError as e:
             log.error("could not save favorites: %s", e)
             QMessageBox.warning(self, "Favorites", f"Could not save favorites: {api.scrub(str(e))}")
             return
-        self._load_favorites(entries)
+        self._load_favorites(entries, post.site)
         for w in map(self.tabs.widget, range(self.tabs.count())):
             if isinstance(w, FavoritesTab):
                 w.favorite_changed(post)
-            elif isinstance(w, SearchTab):
+            elif isinstance(w, SearchTab) and w.site.name == post.site:
                 w.model.mark_changed(post.id)
             elif isinstance(w, ViewerTab):
                 w.update_favorite()
@@ -425,20 +489,22 @@ class MainWindow(QMainWindow):
     def _fill_saved_menu(self):
         m = self.saved_menu
         m.clear()
+        site = self.current_site_search().site.name
+        sc = config.site_cfg(self.cfg, site)
         m.addSection("Followed tags")
-        followed = self.cfg["followed"]
+        followed = sc["followed"]
         for tag in sorted(followed, key=str.lower):
-            m.addAction(tag.replace("&", "&&"), lambda t=tag: self.open_search_tab(t))
+            m.addAction(tag.replace("&", "&&"), lambda t=tag: self.open_search_tab(t, site=site))
         if not followed:
             m.addAction("None yet — right-click a tag in a post tab → Follow tag").setEnabled(False)
         m.addAction("Follow a tag…", self.ask_follow_tag)
         if followed:
             unfollow = m.addMenu("Unfollow")
             for tag in sorted(followed, key=str.lower):
-                unfollow.addAction(tag.replace("&", "&&"), lambda t=tag: self.unfollow_tag(t))
+                unfollow.addAction(tag.replace("&", "&&"), lambda t=tag: self.unfollow_tag(t, site))
         m.addSection("Saved searches")
         m.addAction("Save current search…", self.save_current_search)
-        saved = self.cfg["saved_searches"]
+        saved = sc["saved_searches"]
         if not saved:
             m.addAction("No saved searches yet").setEnabled(False)
             return
@@ -460,16 +526,17 @@ class MainWindow(QMainWindow):
         name = name.strip()
         if not ok or not name:
             return
-        if name in self.cfg["saved_searches"] and QMessageBox.question(
+        saved = config.site_cfg(self.cfg, tab.site.name)["saved_searches"]
+        if name in saved and QMessageBox.question(
             self, "Save search", f"Replace the saved search “{name}”?"
         ) != QMessageBox.Yes:
             return
-        self.cfg["saved_searches"][name] = {"include": include, "exclude": exclude}
+        saved[name] = {"include": include, "exclude": exclude}
         self._save_cfg()
 
     def load_saved_search(self, name: str):
-        s = self.cfg["saved_searches"][name]
         tab = self.current_site_search()
+        s = config.site_cfg(self.cfg, tab.site.name)["saved_searches"][name]
         self.tabs.setCurrentWidget(tab)
         tab.include_edit.setPlainText(s["include"])
         tab.exclude_edit.setPlainText(s["exclude"])
@@ -477,31 +544,125 @@ class MainWindow(QMainWindow):
 
     def delete_saved_search(self, name: str):
         if QMessageBox.question(self, "Delete search", f"Delete the saved search “{name}”?") == QMessageBox.Yes:
-            self.cfg["saved_searches"].pop(name, None)
+            config.site_cfg(self.cfg, self.current_site_search().site.name)["saved_searches"].pop(name, None)
             self._save_cfg()
 
     # ---- downloads
-    def download_posts(self, posts: list[Post], search: str = "", album: Path | None = None) -> list[Path]:
-        """Queue posts; returns their target paths ([] = nothing queued). album: all into that folder, numbered."""
-        if not posts:
+    def download_posts(self, posts: list[Post], search: str = "", album: Path | None = None, queued=None) -> list[Path]:
+        """Queue posts; returns their target paths ([] = nothing queued, or not yet). album: all into that folder,
+        numbered. e-hentai galleries are listed into their pages first; queued(targets) is called once the
+        targets are known (also with [] when nothing is queued), before any of them can finish."""
+        queued = queued or (lambda targets: None)
+        if not posts or not self._confirm_eh(posts):
+            queued([])
             return []
+        if any(p.kind == "gallery" for p in posts):
+            self._expand(posts, lambda pages: self._queue_posts(pages, search, album, queued))
+            return []  # Cancel while listing: queued is never called (cancel_downloads drops the ZIP job itself)
+        return self._queue_posts(posts, search, album, queued)
+
+    @staticmethod
+    def _pictures(posts: list[Post]) -> int:
+        return sum(int(p.album.get("pages", 0) or 0) if p.kind == "gallery" else 1 for p in posts)
+
+    def _confirm_eh(self, posts: list[Post]) -> bool:
+        n = self._pictures([p for p in posts if p.site == "e-hentai"])  # a gallery counts its pages
+        if n <= EH_WARN_PICTURES:
+            return True
+        minutes = math.ceil(n * (2 * EH_GAP_MS) / 60000)
+        return QMessageBox.question(
+            self, "Download from e-hentai",
+            f"Download {n} pictures from e-hentai? This uses your image limit (originals use more) and takes about "
+            f"{minutes} minutes at a polite pace.") == QMessageBox.Yes
+
+    def _expand(self, posts: list[Post], cb):
+        """Galleries become their pages (listed one gallery at a time, in order); then cb(posts)."""
+        todo, out, cancels = list(posts), [], self._cancels
+        site = self.sites["e-hentai"]
+        sb = self.statusBar()
+
+        def step():
+            while todo and todo[0].kind != "gallery":
+                out.append(todo.pop(0))
+            if not todo:
+                if sb.currentMessage().startswith("Listing pages of"):
+                    sb.clearMessage()
+                return cb(out)
+            g = todo.pop(0)
+            sb.showMessage(f"Listing pages of {g.label}…")
+
+            running = []  # this listing's stop() while it runs; "done" once it answered
+
+            def listed(pages, err):
+                if running and running[-1] in self._listings:  # Cancel already cleared the list
+                    self._listings.remove(running[-1])
+                running.append("done")
+                if cancels != self._cancels:
+                    return  # Cancel was pressed meanwhile: queue nothing
+                out.extend(pages)
+                if err:
+                    log.warning("could not list the pages of gallery %s: %s", g.album.get("gid"), err)
+                    sb.showMessage(f"Could not list every page of {g.label}: {err}", 15000)
+                step()
+            stop = site.list_all_pages(g, listed)
+            if not running:  # not answered right away
+                running.append(stop)
+                self._listings.append(stop)
+        step()
+
+    def _queue_posts(self, posts: list[Post], search: str, album: Path | None, queued) -> list[Path]:
         base = album or expand_dir(self.cfg["save_dir"])
-        template = naming.album_template(self.cfg["template"]) if album else self.cfg["template"]
+
+        def template(p: Post) -> str:
+            t = config.site_cfg(self.cfg, p.site)["template"]
+            return naming.album_template(t) if album else t
         try:
-            items = [
-                (p.file_url, naming.target_path(base, template, p, search, naming.index_text(i, len(posts))))
-                for i, p in enumerate(posts)
-            ]
+            targets = [naming.target_path(base, template(p), p, search, naming.index_text(i, len(posts)))
+                       for i, p in enumerate(posts)]
         except ValueError as e:
             QMessageBox.critical(self, "Bad filename template", api.scrub(str(e)))
+            targets = []
+        queued(targets)
+        if not targets:
             return []
-        self._url_ids.update((p.file_url, p.id) for p in posts)
-        self.downloader.add(items)
-        return [t for _, t in items]
+        plain = [(p.file_url, t) for p, t in zip(posts, targets) if p.site != "e-hentai"]
+        eh = [(p, t) for p, t in zip(posts, targets) if p.site == "e-hentai"]  # resolved one by one, paced
+        self._url_ids.update((p.file_url, (p.site, p.id)) for p in posts if p.site != "e-hentai")
+        self._target_ids.update((str(t), (p.site, p.id)) for p, t in eh)
+        if plain:
+            self.downloader.add(plain)
+        if eh:
+            self.feeder.add(eh)
+        return targets
+
+    def _on_eh_paused(self, msg: str):
+        self.statusBar().showMessage(resolve_error(msg))
+        self.resume_btn.show()
+
+    def _resume_eh(self):
+        self.resume_btn.hide()
+        self.statusBar().clearMessage()
+        self.feeder.resume()
+
+    def _on_eh_retargeted(self, old: str, new: str):
+        if old in self._target_ids:
+            self._target_ids[new] = self._target_ids.pop(old)
+        for job in self._zip_jobs:
+            if old in job.pending:
+                job.pending.discard(old)
+                job.pending.add(new)
+
+    def _on_eh_failed(self, page: str, target: str):
+        self._eh_failed += 1
+        self._album_progress(page, target, False)  # a ZIP still completes
+        self._on_progress(*self._last_progress)
 
     # ---- albums: download as one folder or one ZIP
     @staticmethod
     def album_name_suggestion(posts: list[Post], search: str) -> str:
+        titles = {str(p.album.get("title", "")) for p in posts}
+        if len(titles) == 1 and (title := naming.clean_name(titles.pop())):  # one e-hentai gallery
+            return title
         shared = set.intersection(*(set(p.tags_of("artist")) for p in posts)) if posts else set()
         if shared:
             return "+".join(sorted(shared))
@@ -512,7 +673,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Download as…", "Tick the posts you want first.")
             return
         what = "ZIP" if zipped else "folder"
-        name, ok = QInputDialog.getText(self, f"Download as {what}", f"Name for the {what} ({len(posts)} posts):",
+        name, ok = QInputDialog.getText(self, f"Download as {what}",
+                                        f"Name for the {what} ({self._pictures(posts)} posts):",
                                         text=self.album_name_suggestion(posts, search))
         if not ok:
             return
@@ -531,11 +693,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Download as ZIP", api.scrub(str(e)))
             return
         job = _ZipJob(name, parts, set())
-        self._zip_jobs.append(job)  # before queueing: an item can finish (e.g. "already there") right away
-        job.pending = {str(t) for t in self.download_posts(posts, search, album=parts)}
-        if not job.pending:
-            self._zip_jobs.remove(job)
-            shutil.rmtree(parts, ignore_errors=True)
+        self._zip_jobs.append(job)
+
+        def queued(targets):  # before queueing: an item can finish (e.g. "already there") right away
+            job.pending = {str(t) for t in targets}
+            if not job.pending and job in self._zip_jobs:
+                self._zip_jobs.remove(job)
+                shutil.rmtree(parts, ignore_errors=True)
+        self.download_posts(posts, search, album=parts, queued=queued)
 
     def _album_progress(self, url: str, target: str, ok: bool):
         for job in list(self._zip_jobs):
@@ -551,7 +716,7 @@ class MainWindow(QMainWindow):
         failed = f", {job.failed} failed (Settings → Show log… has details)" if job.failed else ""
         if not files:
             shutil.rmtree(job.parts, ignore_errors=True)
-            self.downloader.forget_failed(job.parts)
+            self._forget_failed(job.parts)
             self.statusBar().showMessage(f"ZIP “{job.name}” not created: nothing downloaded{failed}", 15000)
             return
         target = naming.unique_path(job.parts.parent / f"{job.name}.zip", None)
@@ -573,35 +738,59 @@ class MainWindow(QMainWindow):
                                 f"The downloaded files are kept in {job.parts}")
             return
         shutil.rmtree(job.parts, ignore_errors=True)
-        self.downloader.forget_failed(job.parts)  # "Retry failed" can't refill a ZIP that's already written
+        self._forget_failed(job.parts)  # "Retry failed" can't refill a ZIP that's already written
         log.info("saved %s (%d files%s)", target.name, files, f", {job.failed} failed" if job.failed else "")
         self.statusBar().showMessage(f"Saved {target.name}: {files} files{failed}", 15000)
 
+    def _retry_failed(self):
+        self._eh_failed = 0
+        self.feeder.retry_failed()  # first: takes its pictures out of the downloader's failed list
+        self.downloader.retry_failed()
+        self._on_progress(*self._last_progress)
+
+    def _forget_failed(self, parts: Path):
+        self.downloader.forget_failed(parts)
+        self.feeder.forget_failed(parts)
+
     def cancel_downloads(self):
+        self._cancels += 1
+        for stop in self._listings:
+            stop()
+        if self._listings and self.statusBar().currentMessage().startswith("Listing pages of"):
+            self.statusBar().clearMessage()
+        self._listings.clear()
+        self.feeder.cancel()
+        self.resume_btn.hide()
+        self._eh_failed = 0
         self.downloader.cancel()
         for job in self._zip_jobs:
             shutil.rmtree(job.parts, ignore_errors=True)
-            self.downloader.forget_failed(job.parts)
+            self._forget_failed(job.parts)
         self._zip_jobs.clear()
 
-    def _on_item_done(self, url: str, _target: str, ok: bool):
-        post_id = self._url_ids.get(url) if ok else None
-        if post_id is None or post_id in self.downloaded:
+    def _on_item_done(self, url: str, target: str, ok: bool):
+        site_id = (self._url_ids.get(url) or self._target_ids.get(target)) if ok else None
+        if site_id is None or site_id[1] in self.downloaded[site_id[0]]:
             return
+        site, post_id = site_id
         try:
-            config.add_history(post_id)
+            config.add_history(post_id, site)
         except OSError as e:  # the mark still shows this session; history just won't remember it
             log.warning("could not write download history: %s", e)
+        self.downloaded[site].add(post_id)  # also when no tab on that site is open
         for tab in self.search_tabs():
-            tab.model.mark_downloaded(post_id)
+            if tab.site.name == site:
+                tab.model.mark_downloaded(post_id)
 
     def _on_progress(self, done: int, total: int, active: int, failed: int):
+        self._last_progress = (done, total, active, failed)
         self.progress_bar.setMaximum(max(total, 1))
         self.progress_bar.setValue(done)
-        self.progress_label.setText(f"{done}/{total} · {active} active · {failed} failed")
+        waiting = f" · {self.feeder.waiting} e-hentai waiting" if self.feeder.waiting else ""
+        self.progress_label.setText(f"{done}/{total} · {active} active · {failed + self._eh_failed} failed{waiting}")
 
     def closeEvent(self, e):
-        if self.downloader.active:
+        if self.downloader.active or self.feeder.active or self._listings or self._zip_jobs:
             r = QMessageBox.question(self, "Quit", "Downloads are in progress. Cancel them and quit?")
             if r != QMessageBox.Yes:
                 e.ignore()

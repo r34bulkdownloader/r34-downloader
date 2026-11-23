@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
 
 from . import api
 from .models import Post
-from .viewer import ViewerTab
+from .sites.ehclient import CANCELLED
+from .viewer import IMAGE_LIMIT_TEXT, ViewerTab, known, resolve_error
 from .widgets import VIDEO_EXT, FullscreenWindow, VideoView, hint_label
 
 ERROR_MS = 1500  # a post that can't be shown stays this long (with the reason) before the show moves on
@@ -23,7 +24,7 @@ VIDEO_WAIT_MS = 30_000  # a video that hasn't started loading by then is skipped
 
 class _Relay(QObject):
     """Lives for the whole run, so decode threads never emit on a slideshow window that's being deleted."""
-    decoded = Signal(int, int, object)  # show serial, post id, QImage or None
+    decoded = Signal(int, object, object)  # show serial, post id (e-hentai ids pass 32 bits), QImage or None
 
 
 _relay: _Relay | None = None
@@ -105,8 +106,10 @@ class Slideshow(FullscreenWindow):
     favorite_toggled = Signal(object)  # Post
     is_favorite: Callable[[int], bool] = staticmethod(lambda post_id: False)  # set by the window
 
-    def __init__(self, posts: list[Post], nam: QNetworkAccessManager, opts: dict, origin=None):
+    def __init__(self, posts: list[Post], nam: QNetworkAccessManager, opts: dict, origin=None, resolve=None):
         super().__init__()
+        self._resolve = resolve or known
+        self._resolving: set[int] = set()  # posts whose file address is being looked up
         self._nam = nam
         self._opts = opts
         self._origin = origin
@@ -281,15 +284,9 @@ class Slideshow(FullscreenWindow):
         self._clear()
         self._update_info()
         if post.ext in VIDEO_EXT:
-            self.picture.hide()
-            self.video.show()
-            self._player.setLoops(1)
-            self._player.setSource(QUrl(post.file_url))
-            self._shown = True
-            if not self._paused:
-                self._player.play()
-                # Capped: move on after video_max. Whole video: a watchdog until it starts loading.
-                self._timer.start((self._opts["video_max"] * 1000) or VIDEO_WAIT_MS)
+            i = self._i
+            alive = lambda: self._i == i and not self._closed  # noqa: E731
+            self._resolve(post, lambda p, err: self._play_video(p, err) if alive() else None, alive=alive)
         else:
             got = self._cache.get(post.id)
             if got is None:
@@ -298,6 +295,21 @@ class Slideshow(FullscreenWindow):
             else:
                 self._display(post, got)
         self._prefetch()
+
+    def _play_video(self, post: Post, err: str | None):
+        if err == CANCELLED:
+            return
+        if err:
+            return self._failed(resolve_error(err))
+        self.picture.hide()
+        self.video.show()
+        self._player.setLoops(1)
+        self._player.setSource(QUrl(post.file_url))
+        self._shown = True
+        if not self._paused:
+            self._player.play()
+            # Capped: move on after video_max. Whole video: a watchdog until it starts loading.
+            self._timer.start((self._opts["video_max"] * 1000) or VIDEO_WAIT_MS)
 
     def _display(self, post: Post, got):
         self.video.hide()
@@ -342,7 +354,10 @@ class Slideshow(FullscreenWindow):
         self._clear()
         self._message(api.scrub(text))
         self._shown = True
-        if not self._paused:
+        if text == IMAGE_LIMIT_TEXT:  # moving on would only hit the limit again
+            if not self._paused:
+                self.toggle_pause()
+        elif not self._paused:
             self._timer.start(ERROR_MS)
 
     # ---- moving on by itself
@@ -424,7 +439,21 @@ class Slideshow(FullscreenWindow):
         reply.deleteLater()
 
     def _fetch(self, post: Post):
-        if post.id in self._replies or post.id in self._decoding or self._closed:
+        if post.id in self._replies or post.id in self._decoding or post.id in self._resolving or self._closed:
+            return
+        self._resolving.add(post.id)
+        self._resolve(post, self._resolved, alive=lambda: self._still_needed(post))
+
+    def _still_needed(self, post: Post) -> bool:
+        return not self._closed and any(p is not None and p.id == post.id for p in (self.current(), self._peek_next()))
+
+    def _resolved(self, post: Post, err: str | None):
+        self._resolving.discard(post.id)
+        if not self._still_needed(post):
+            return  # moved on meanwhile
+        if err:
+            if err != CANCELLED and self._is_current(post.id):
+                self._failed(resolve_error(err))
             return
         reply = self._nam.get(api.request(post.file_url))
         self._replies[post.id] = reply
@@ -442,7 +471,7 @@ class Slideshow(FullscreenWindow):
             return
         if not ok:
             if self._is_current(post.id):
-                self._failed(f"Can't load #{post.id}: {msg}")
+                self._failed(f"Can't load {post.label}: {msg}")
             return
         if post.ext == "gif":
             self._ready(post.id, data)
@@ -499,7 +528,7 @@ class Slideshow(FullscreenWindow):
         more = "+" if self._origin is not None and not self._origin._closed and self._origin.can_load_more() else ""
         parts = []
         if post is not None and not self._ended:
-            parts.append(f"#{post.id}")
+            parts.append(post.label)
             parts.append(f"{self._i + 1} / {len(self._order)}{more}")
             if self.is_favorite(post.id):
                 parts.append("♥")

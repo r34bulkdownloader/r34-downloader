@@ -196,3 +196,172 @@ def test_whole_video_mode_has_a_watchdog(win):
     assert s._timer.isActive() and s._timer.interval() == slideshow.VIDEO_WAIT_MS
     s._on_media_status(slideshow.QMediaPlayer.LoadedMedia)
     assert not s._timer.isActive()
+
+
+# ---- lazy file address (e-hentai pages are resolved just before loading)
+from r34dl.sites.ehclient import CANCELLED  # noqa: E402
+from r34dl.together import TogetherTab  # noqa: E402
+from r34dl.viewer import ViewerTab  # noqa: E402
+
+
+def page(i):
+    return Post(100000 + i, "", "", "", "", [], "", 0, 0, 0, site="e-hentai", kind="page",
+                page_url=f"https://e-hentai.org/s/abc/1-{i}", file_name=f"{i}.jpg",
+                album={"gid": 1, "title": "My Gallery", "page": i, "pages": 9, "category": "Manga"})
+
+
+class _Resolver:
+    """Holds the callbacks until fire(); records which posts were asked for."""
+
+    def __init__(self, auto=False):
+        self.calls, self.auto = [], auto
+
+    def __call__(self, post, cb, alive=None):
+        self.calls.append((post, cb))
+        self.alive = getattr(self, "alive", {})
+        self.alive[post.id] = alive
+        if self.auto:
+            self.fire(post)
+
+    def fire(self, post, err=None):
+        cb = next(c for p, c in self.calls if p is post)
+        if err is None:
+            post.file_url = f"https://img.test/{post.id}.jpg"
+        cb(post, err)
+
+
+@pytest.fixture
+def got(win, monkeypatch):
+    urls = []
+
+    def get(self, req):
+        urls.append(req.url().toString())
+        return _NeverReply()
+    monkeypatch.setattr(ui.QNetworkAccessManager, "get", get)
+    return urls
+
+
+def _viewer(win, posts, resolve):
+    win.first.model.append(posts)
+    return ViewerTab(posts[0], win.first.model, win.nam, resolve=resolve)
+
+
+def test_viewer_resolves_before_loading(win, got):
+    r = _Resolver()
+    tab = _viewer(win, [page(1)], r)
+    assert got == [] and len(r.calls) == 1
+    r.fire(tab.post)
+    assert got == ["https://img.test/100001.jpg"]
+
+
+def test_viewer_ignores_late_resolve(win, got):
+    r = _Resolver()
+    tab = _viewer(win, [page(1), page(2)], r)
+    first = tab.post
+    tab.step(1)
+    r.fire(first)
+    assert got == []  # the old post's address came too late
+    r.fire(tab.post)
+    assert got == ["https://img.test/100002.jpg"]
+
+
+def test_viewer_lookups_of_posts_it_left_are_not_wanted(win, got):
+    r = _Resolver()
+    tab = _viewer(win, [page(1), page(2)], r)
+    assert r.alive[100001]()
+    tab.step(1)
+    assert not r.alive[100001]() and r.alive[100002]()
+    tab.release()
+    assert not r.alive[100002]()
+
+
+def test_slideshow_and_together_lookups_stop_being_wanted(win, got):
+    r = _Resolver()
+    posts = [page(1), page(2), page(3), page(4)]
+    s = slideshow.Slideshow(posts, win.nam, OPTS, resolve=r)
+    s.go(1)
+    assert r.alive[100001]() and r.alive[100002]()  # shown and next
+    s.go(1)
+    s.go(1)
+    assert not r.alive[100001]() and r.alive[100003]()
+    t = TogetherTab([page(5), page(6)], win.nam, resolve=r)
+    assert r.alive[100005]()
+    t.release()
+    assert not r.alive[100005]()
+
+
+def test_viewer_image_limit_message(win, got):
+    r = _Resolver()
+    tab = _viewer(win, [page(1), page(2)], r)
+    r.fire(tab.post, "IMAGE_LIMIT")
+    assert tab.media.text() == ("e-hentai's image limit is reached. Try again later, or log in in Settings "
+                                "for a higher limit.")
+    tab.step(1)
+    r.fire(tab.post, CANCELLED)
+    assert "cancel" not in tab.media.text().lower() and got == []
+
+
+def test_viewer_info_for_an_ehentai_page(win, got):
+    tab = _viewer(win, [page(3)], _Resolver())
+    titles = []
+    tab.title_changed.connect(titles.append)
+    tab.show_post(tab.post)
+    text = tab.info.text()
+    assert "My Gallery" in text and "page 3 of 9" in text and "Manga" in text and "score" not in text
+    assert titles == [tab.post.label]
+
+
+def test_main_window_resolve_goes_to_the_posts_site(win, monkeypatch):
+    seen = []
+    monkeypatch.setattr(win.sites["e-hentai"], "resolve", lambda p, dl, cb, alive=None: seen.append((p, dl)))
+    p = page(1)
+    win.resolve(p, lambda *_: None)
+    assert seen == [(p, False)]
+
+
+def test_slideshow_resolves_current_and_only_the_next_one(win, got):
+    r = _Resolver()
+    posts = [page(1), page(2), page(3)]
+    s = slideshow.Slideshow(posts, win.nam, OPTS, resolve=r)
+    s.go(1)
+    assert [p.id for p, _ in r.calls] == [100001, 100002] and got == []
+    r.fire(posts[0])
+    assert got == ["https://img.test/100001.jpg"]
+    s.go(1)
+    r.fire(posts[0])  # nothing new: post 1 was already resolved and is not shown/next
+    assert [p.id for p, _ in r.calls] == [100001, 100002, 100003]
+    r.fire(posts[1], "IMAGE_LIMIT")
+    assert "image limit" in s.picture.text()
+
+
+def test_slideshow_ignores_a_resolve_for_a_post_it_left(win, got):
+    r = _Resolver()
+    posts = [page(1), page(2), page(3), page(4)]
+    s = slideshow.Slideshow(posts, win.nam, OPTS, resolve=r)
+    s.go(1)
+    s.go(1)
+    s.go(1)  # now on 3; 1 is neither shown nor next
+    r.fire(posts[0])
+    assert "https://img.test/100001.jpg" not in got
+
+
+def test_together_resolves_ehentai_pages_but_keeps_rule34_samples(win, got):
+    r34 = Post(7, "h", "https://x/7.jpg", "", "https://x/s7.jpg", [], "s", 0, 10, 10)
+    r = _Resolver(auto=True)
+    TogetherTab([r34, page(1)], win.nam, resolve=r)
+    assert got == ["https://x/s7.jpg", "https://img.test/100001.jpg"]
+
+
+def test_slideshow_pauses_on_the_image_limit(win):
+    s = slideshow.Slideshow([mk(1), mk(2)], win.nam, OPTS, resolve=lambda p, cb, alive=None: cb(p, "IMAGE_LIMIT"))
+    s.go(1)
+    assert s._paused and not s._timer.isActive() and s.current().id == 1
+    assert "image limit" in s.picture.text()
+
+
+def test_slideshow_decode_relay_carries_eh_sized_ids(win):
+    big = 4349020 * 100000 + 2  # e-hentai page ids pass 32 bits: a Signal(int) argument overflowed (live check)
+    s = _show([mk(1), mk(2)], win=win)
+    s._decoding.add(big)
+    slideshow.relay().decoded.emit(s._serial, big, None)
+    assert big not in s._decoding

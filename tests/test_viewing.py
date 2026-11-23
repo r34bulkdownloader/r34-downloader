@@ -216,8 +216,10 @@ class _Resolver:
     def __init__(self, auto=False):
         self.calls, self.auto = [], auto
 
-    def __call__(self, post, cb):
+    def __call__(self, post, cb, alive=None):
         self.calls.append((post, cb))
+        self.alive = getattr(self, "alive", {})
+        self.alive[post.id] = alive
         if self.auto:
             self.fire(post)
 
@@ -263,6 +265,31 @@ def test_viewer_ignores_late_resolve(win, got):
     assert got == ["https://img.test/100002.jpg"]
 
 
+def test_viewer_lookups_of_posts_it_left_are_not_wanted(win, got):
+    r = _Resolver()
+    tab = _viewer(win, [page(1), page(2)], r)
+    assert r.alive[100001]()
+    tab.step(1)
+    assert not r.alive[100001]() and r.alive[100002]()
+    tab.release()
+    assert not r.alive[100002]()
+
+
+def test_slideshow_and_together_lookups_stop_being_wanted(win, got):
+    r = _Resolver()
+    posts = [page(1), page(2), page(3), page(4)]
+    s = slideshow.Slideshow(posts, win.nam, OPTS, resolve=r)
+    s.go(1)
+    assert r.alive[100001]() and r.alive[100002]()  # shown and next
+    s.go(1)
+    s.go(1)
+    assert not r.alive[100001]() and r.alive[100003]()
+    t = TogetherTab([page(5), page(6)], win.nam, resolve=r)
+    assert r.alive[100005]()
+    t.release()
+    assert not r.alive[100005]()
+
+
 def test_viewer_image_limit_message(win, got):
     r = _Resolver()
     tab = _viewer(win, [page(1), page(2)], r)
@@ -286,7 +313,7 @@ def test_viewer_info_for_an_ehentai_page(win, got):
 
 def test_main_window_resolve_goes_to_the_posts_site(win, monkeypatch):
     seen = []
-    monkeypatch.setattr(win.sites["e-hentai"], "resolve", lambda p, dl, cb: seen.append((p, dl)))
+    monkeypatch.setattr(win.sites["e-hentai"], "resolve", lambda p, dl, cb, alive=None: seen.append((p, dl)))
     p = page(1)
     win.resolve(p, lambda *_: None)
     assert seen == [(p, False)]
@@ -326,7 +353,7 @@ def test_together_resolves_ehentai_pages_but_keeps_rule34_samples(win, got):
 
 
 def test_slideshow_pauses_on_the_image_limit(win):
-    s = slideshow.Slideshow([mk(1), mk(2)], win.nam, OPTS, resolve=lambda p, cb: cb(p, "IMAGE_LIMIT"))
+    s = slideshow.Slideshow([mk(1), mk(2)], win.nam, OPTS, resolve=lambda p, cb, alive=None: cb(p, "IMAGE_LIMIT"))
     s.go(1)
     assert s._paused and not s._timer.isActive() and s.current().id == 1
     assert "image limit" in s.picture.text()

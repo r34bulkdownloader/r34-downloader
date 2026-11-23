@@ -18,7 +18,7 @@ EH_GAP_MS = 1000
 EH_BURST_PAUSE_MS = 5000
 EH_BURST = 4
 EH_WARN_PICTURES = 200  # a bigger download batch asks first
-CANCELLED = "cancelled"  # error given to jobs dropped by clear()
+CANCELLED = "cancelled"  # error given to a job whose alive() said it is no longer wanted
 WARNING_MSG = "This gallery is behind a content warning that the app couldn't skip."
 BLOCKED_MSG = ("e-hentai says pages are being opened too fast, or has blocked this IP address for a while. "
                "Wait (it can take an hour) and try again.")
@@ -39,7 +39,7 @@ class EhQueue(QObject):
         super().__init__(parent)
         self._nam = nam or QNetworkAccessManager(self)
         self.gap_ms, self.burst_pause_ms, self.retry_delays_ms = EH_GAP_MS, EH_BURST_PAUSE_MS, api.RETRY_DELAYS_MS
-        self._jobs: deque = deque()  # (url, body or None, cb, attempt)
+        self._jobs: deque = deque()  # (url, body or None, cb, attempt, alive or None)
         self._low: deque = deque()  # download jobs: sent only when nothing else waits (viewing comes first)
         self._busy = False
         self._sent = 0
@@ -54,33 +54,32 @@ class EhQueue(QObject):
         self.logged_in = ok
         self._cookie = f"ipb_member_id={member_id}; ipb_pass_hash={pass_hash}; nw=1".encode() if ok else b"nw=1"
 
-    def get(self, url: str, cb, low: bool = False) -> None:
+    def get(self, url: str, cb, low: bool = False, alive=None) -> None:
+        """alive(): checked just before sending; once it says False the job is dropped, cb gets CANCELLED."""
         if low:
-            self._low.append((url, None, cb, 0))
+            self._low.append((url, None, cb, 0, alive))
             return self._pump()
-        self._add((url, None, cb, 0))
+        self._add((url, None, cb, 0, alive))
 
     def post(self, url: str, body: bytes, cb) -> None:
-        self._add((url, body, cb, 0))
-
-    def clear(self) -> None:
-        """Drop pending jobs; each callback still fires once, with CANCELLED."""
-        jobs, self._jobs, self._low = list(self._jobs) + list(self._low), deque(), deque()
-        for _url, _body, cb, _attempt in jobs:
-            cb(None, b"", CANCELLED)
+        self._add((url, body, cb, 0, None))
 
     def _add(self, job, front=False) -> None:
         self._jobs.appendleft(job) if front else self._jobs.append(job)
         self._pump()
 
     def _pump(self) -> None:
-        if self._busy or not (self._jobs or self._low):
-            return
-        wait_ms = (self._next_at - time.monotonic()) * 1000
-        if wait_ms > 0:
-            self._timer.start(int(wait_ms) + 1)
-            return
-        url, body, cb, attempt = job = (self._jobs or self._low).popleft()
+        while True:
+            if self._busy or not (self._jobs or self._low):
+                return
+            wait_ms = (self._next_at - time.monotonic()) * 1000
+            if wait_ms > 0:
+                self._timer.start(int(wait_ms) + 1)
+                return
+            url, body, cb, attempt, alive = job = (self._jobs or self._low).popleft()
+            if alive is None or alive():
+                break
+            cb(None, b"", CANCELLED)  # e.g. the viewer moved on: no paced request is spent on it
         self._busy = True
         self._sent += 1
         gap = self.burst_pause_ms if self._sent % EH_BURST == 0 else self.gap_ms
@@ -96,7 +95,7 @@ class EhQueue(QObject):
         reply.finished.connect(lambda: self._done(reply, job))
 
     def _done(self, reply, job) -> None:
-        url, body, cb, attempt = job
+        url, body, cb, attempt, alive = job
         reply.deleteLater()
         self._busy = False
         status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
@@ -104,7 +103,7 @@ class EhQueue(QObject):
         if status in (429, 503) and attempt < len(self.retry_delays_ms):
             log.info("e-hentai busy (HTTP %s), retry %d", status, attempt + 1)
             self._next_at = max(self._next_at, time.monotonic() + self.retry_delays_ms[attempt] / 1000)
-            self._add((url, body, cb, attempt + 1), front=True)
+            self._add((url, body, cb, attempt + 1, alive), front=True)
             return
         if status in (429, 503):
             err = "e-hentai is rate limiting requests. Try again later."
@@ -151,7 +150,7 @@ class EhentaiSite(Site):
 
         def on_search(status, body, err):
             if err:
-                return None if err == CANCELLED else self.failed.emit(generation, err)
+                return self.failed.emit(generation, err)
             pairs, nxt = eh.parse_search(body.decode("utf-8", "replace"))
             self._gdata(pairs, [], generation, nxt)
         self.queue.get(eh.search_url(query, cursor), on_search)
@@ -163,10 +162,10 @@ class EhentaiSite(Site):
 
         def on_gdata(status, body, err):
             if err:
-                return None if err == CANCELLED else self.failed.emit(gen, err)  # cancelled = stale generation
+                return self.failed.emit(gen, err)
             try:
                 posts = eh.parse_gdata(body)
-            except (ValueError, AttributeError, TypeError):
+            except (ValueError, AttributeError, TypeError, OverflowError):
                 return self.failed.emit(gen, "Could not read e-hentai's gallery data.")
             for p in posts:
                 if not eh.safe_image_url(p.preview_url):
@@ -177,7 +176,7 @@ class EhentaiSite(Site):
     def fetch_gallery(self, gallery: Post, p: int | None, gen: int) -> None:
         def on_page(status, body, err):
             if err:
-                return None if err == CANCELLED else self.failed.emit(gen, err)  # cancelled = stale generation
+                return self.failed.emit(gen, err)
             try:
                 pages, nxt = eh.parse_gallery(body.decode("utf-8", "replace"), gallery)
             except eh.GalleryWarning:
@@ -191,13 +190,10 @@ class EhentaiSite(Site):
             self.page_ready.emit(gen, pages, nxt)
         self.queue.get(eh.gallery_url(gallery.album["gid"], gallery.album["token"], p), on_page)
 
-    def suggest_request(self, word: str):
-        return None
-
     def post_page_url(self, post: Post) -> str:
         return post.page_url
 
-    def resolve(self, post: Post, for_download: bool, cb) -> None:
+    def resolve(self, post: Post, for_download: bool, cb, alive=None) -> None:
         if post.kind != "page":
             return super().resolve(post, for_download, cb)
         if not post.page_url.startswith(eh.EH + "/s/"):
@@ -218,7 +214,7 @@ class EhentaiSite(Site):
             post.album["shown"] = shown
             post.album["original"] = original if original and eh.safe_image_url(original) else ""
             self._pick(post, for_download, cb)
-        self.queue.get(post.page_url, on_page, low=for_download)
+        self.queue.get(post.page_url, on_page, low=for_download, alive=alive)
 
     def list_all_pages(self, gallery: Post, cb):
         """Every page post of the gallery, walking fetch_gallery until there is no next p; then
@@ -297,8 +293,7 @@ class EhDownloadFeeder(QObject):
         self._next()
 
     def cancel(self) -> None:
-        # shortcut: a resolve already in the site queue is still sent once and its answer ignored
-        self._gen += 1
+        self._gen += 1  # a resolve still waiting in the site queue is dropped there, unsent
         self._jobs.clear()
         self._busy = self._paused = False
 
@@ -307,14 +302,13 @@ class EhDownloadFeeder(QObject):
             return
         post, target = self._jobs[0]
         self._busy, gen = True, self._gen
-        self.site.resolve(post, True, lambda p, err: self._resolved(p, target, err, gen))
+        self.site.resolve(post, True, lambda p, err: self._resolved(p, target, err, gen),
+                          alive=lambda: gen == self._gen)
 
     def _resolved(self, post: Post, target, err, gen: int) -> None:
         if gen != self._gen:
             return
         self._busy = False
-        if err == CANCELLED:  # someone cleared the site queue: silent, ask again
-            return self._next()
         if err in ("IMAGE_LIMIT", BLOCKED_MSG):  # going on would only make it worse
             self._paused = True
             return self.paused.emit(err)

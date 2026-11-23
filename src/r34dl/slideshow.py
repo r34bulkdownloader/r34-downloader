@@ -285,7 +285,8 @@ class Slideshow(FullscreenWindow):
         self._update_info()
         if post.ext in VIDEO_EXT:
             i = self._i
-            self._resolve(post, lambda p, err: self._play_video(p, err) if self._i == i and not self._closed else None)
+            alive = lambda: self._i == i and not self._closed  # noqa: E731
+            self._resolve(post, lambda p, err: self._play_video(p, err) if alive() else None, alive=alive)
         else:
             got = self._cache.get(post.id)
             if got is None:
@@ -441,11 +442,14 @@ class Slideshow(FullscreenWindow):
         if post.id in self._replies or post.id in self._decoding or post.id in self._resolving or self._closed:
             return
         self._resolving.add(post.id)
-        self._resolve(post, self._resolved)
+        self._resolve(post, self._resolved, alive=lambda: self._still_needed(post))
+
+    def _still_needed(self, post: Post) -> bool:
+        return not self._closed and any(p is not None and p.id == post.id for p in (self.current(), self._peek_next()))
 
     def _resolved(self, post: Post, err: str | None):
         self._resolving.discard(post.id)
-        if self._closed or not any(p is not None and p.id == post.id for p in (self.current(), self._peek_next())):
+        if not self._still_needed(post):
             return  # moved on meanwhile
         if err:
             if err != CANCELLED and self._is_current(post.id):

@@ -104,7 +104,7 @@ class TogetherTab(QWidget):
         try:
             while len(self._replies) + self._resolving < MAX_THUMBS and self._queue:
                 self._resolving += 1
-                self._resolve(self._queue.popleft(), self._resolved)
+                self._resolve(self._queue.popleft(), self._resolved, alive=lambda: not self._released)
         finally:
             self._pumping = False
 

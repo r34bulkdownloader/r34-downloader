@@ -246,7 +246,7 @@ def test_gallery_menu_downloads_whole_gallery_as_zip(win, monkeypatch, tmp_path)
     monkeypatch.setattr(site, "list_all_pages", lambda gal, cb: listed.append(win.statusBar().currentMessage())
                         or cb(pages(gal, 1, 3), None))
 
-    def resolve(post, for_download, cb):
+    def resolve(post, for_download, cb, alive=None):
         if post.album["page"] == 2:
             return cb(post, "Could not read the picture page.")
         post.file_url = f"https://h.hath.network/{post.id}.jpg"
@@ -279,7 +279,7 @@ def test_image_limit_pauses_and_resume_button_continues(win, monkeypatch, tmp_pa
     win.cfg["save_dir"] = str(tmp_path)
     site = win.sites["e-hentai"]
     answer = ["IMAGE_LIMIT"]
-    monkeypatch.setattr(site, "resolve", lambda post, d, cb: cb(post, answer.pop() if answer else None))
+    monkeypatch.setattr(site, "resolve", lambda post, d, cb, alive=None: cb(post, answer.pop() if answer else None))
     added = []
     monkeypatch.setattr(win.downloader, "add", lambda items: added.extend(items))
     win.download_posts(pages(gallery(), 1, 2))
@@ -298,7 +298,7 @@ def test_cancel_while_listing_a_gallery_queues_nothing(win, monkeypatch, tmp_pat
         waiting.append(cb)
         return lambda: stopped.append(1)
     monkeypatch.setattr(site, "list_all_pages", list_all_pages)
-    monkeypatch.setattr(site, "resolve", lambda post, d, cb: cb(post, None))
+    monkeypatch.setattr(site, "resolve", lambda post, d, cb, alive=None: cb(post, None))
     added = []
     monkeypatch.setattr(win.downloader, "add", lambda items: added.extend(items))
     monkeypatch.setattr(ui.QInputDialog, "getText", staticmethod(lambda *a, **k: ("gal", True)))

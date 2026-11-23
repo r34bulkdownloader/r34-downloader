@@ -38,8 +38,9 @@ class Site(QObject):
     def post_page_url(self, post: Post) -> str:
         raise NotImplementedError
 
-    def resolve(self, post: Post, for_download: bool, cb) -> None:
-        """Make sure post.file_url is known, then cb(post, error or None)."""
+    def resolve(self, post: Post, for_download: bool, cb, alive=None) -> None:
+        """Make sure post.file_url is known, then cb(post, error or None). alive(): False once the answer is
+        no longer wanted (a site may then skip the request and answer CANCELLED)."""
         cb(post, None)  # default: file_url already known
 
 

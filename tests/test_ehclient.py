@@ -133,42 +133,48 @@ def test_queue_rejects_offsite_redirect(qapp):
     assert got[0]
 
 
-def test_queue_clear_drops_pending(qapp):
+def test_queue_skips_lookups_no_longer_wanted(qapp):
     nam = FakeNam({"e-hentai.org": (200, b"ok")})
     q = fast(EhQueue(nam=nam))
     first, got = [], []
-    q.get("https://e-hentai.org/busy", lambda s, b, e: first.append(s))  # in flight, not dropped
-    for i in range(3):
-        q.get(f"https://e-hentai.org/{i}", lambda s, b, e, i=i: got.append((i, s, e)))
-    q.clear()
-    assert got == [(i, None, ehclient.CANCELLED) for i in range(3)]  # each fires once, right away
-    spin_until(lambda: first)
-    loop = QEventLoop()
-    QTimer.singleShot(200, loop.quit)
-    loop.exec()
-    assert len(nam.sent) == 1 and first == [200] and len(got) == 3
+    q.get("https://e-hentai.org/busy", lambda s, b, e: first.append(s))  # in flight
+    for i in range(5):  # pressing next five times: only the page landed on is still wanted
+        q.get(f"https://e-hentai.org/{i}", lambda s, b, e, i=i: got.append((i, e)), alive=lambda i=i: i == 4)
+    spin_until(lambda: len(got) == 5)
+    assert [u for _, u, _, _ in nam.sent] == ["https://e-hentai.org/busy", "https://e-hentai.org/4"]
+    assert got == [(0, ehclient.CANCELLED), (1, ehclient.CANCELLED), (2, ehclient.CANCELLED),
+                   (3, ehclient.CANCELLED), (4, "")]
 
 
-def test_resolve_cancelled_by_clear(qapp):
+def test_resolve_passes_alive_to_the_queue(qapp):
     site = _site({"e-hentai.org": (200, b"ok")})
     site.queue.get("https://e-hentai.org/busy", lambda *a: None)
     out = []
-    site.resolve(_page(), False, lambda p, err: out.append(err))
-    site.queue.clear()
-    assert out == [ehclient.CANCELLED]
+    site.resolve(_page(), False, lambda p, err: out.append(err), alive=lambda: False)
+    spin_until(lambda: out)
+    assert out == [ehclient.CANCELLED] and len(site.queue._nam.sent) == 1
 
 
-def test_cancelled_search_is_silent_and_bad_gdata_fails(qapp):
-    site = _site({"busy": (200, b""), "api.e-hentai.org": (200, b'{"gmetadata": 5}'), "f_search": (200, fix("search.html"))})
+def test_bad_gdata_fails(qapp):
+    site = _site({"api.e-hentai.org": (200, b'{"gmetadata": 5}'), "f_search": (200, fix("search.html"))})
     got, bad = [], []
     site.page_ready.connect(lambda *a: got.append(a))
     site.failed.connect(lambda g, m: bad.append((g, m)))
-    site.queue.get("https://e-hentai.org/busy", lambda *a: None)
-    site.fetch("x", None, 1, {})
-    site.queue.clear()  # generation 1 is stale: no page_ready, no failed
     site.fetch("x", None, 2, {})
     spin_until(lambda: bad)
     assert not got and [g for g, _ in bad] == [2]
+
+
+def test_gdata_with_an_infinite_rating_skips_that_gallery(qapp):
+    body = b'{"gmetadata": [{"gid": 1, "token": "0123456789", "title": "t", "filecount": "2", "category": "Manga", ' \
+           b'"thumb": "https://ehgt.org/t.jpg", "rating": "inf", "tags": []}]}'
+    site = _site({"api.e-hentai.org": (200, body), "f_search": (200, fix("search.html"))})
+    got, bad = [], []
+    site.page_ready.connect(lambda g, posts, nxt: got.append(posts))
+    site.failed.connect(lambda g, m: bad.append(m))
+    site.fetch("x", None, 3, {})
+    spin_until(lambda: got or bad)
+    assert got and not bad and all(p.album["gid"] != 1 for p in got[0])
 
 
 def _site(routes):
@@ -317,7 +323,7 @@ class FakeSite:
         self.queue.set_login("9", "abc") if logged_in else None
         self.calls, self.answers = [], {}
 
-    def resolve(self, post, for_download, cb):
+    def resolve(self, post, for_download, cb, alive=None):
         assert for_download
         self.calls.append(post)
         post.file_url = f"https://h.hath.network/{post.id}.jpg"

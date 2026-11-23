@@ -42,10 +42,6 @@ SITE_DEFAULTS = {
                  "followed": [], "saved_searches": {}, "member_id": "", "pass_hash": ""},
 }
 
-# Keys of the password-protected credentials dict (secret.seal); the first two are rule34.xxx's.
-CRED_KEYS = ("user_id", "api_key", "eh_member_id", "eh_pass_hash")
-
-
 def site_cfg(cfg: dict, site: str) -> dict:
     """The settings dict for a site: cfg itself for rule34.xxx, else cfg["sites"][site] filled with defaults
     (missing or wrong-typed keys fall back one by one). Fills in memory only; load() never writes."""

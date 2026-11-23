@@ -86,7 +86,7 @@ def parse_gdata(body: bytes) -> list[Post]:
             posts.append(Post(gid * 100000, "", "", e["thumb"], "", tags, album["category"].lower(),
                               int(float(e["rating"]) * 10), 0, 0, {t: (_kind(t), 0) for t in tags},
                               site="e-hentai", kind="gallery", page_url=f"{EH}/g/{gid}/{token}/", album=album))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):  # OverflowError: a rating of "inf"
             continue  # skip a malformed entry rather than lose the whole page
     return posts
 

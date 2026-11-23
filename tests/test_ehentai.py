@@ -170,3 +170,12 @@ def test_safe_image_url():
     assert safe_image_url("https://beef.cafe/x.jpg")  # hex-looking host name is still a name
     assert safe_image_url("https://dpncxca.dxnltjxeaefj.hath.network:31209/h/a/2.webp")
     assert not safe_image_url("http://10.0.0.1/x") and not safe_image_url("http://LOCALHOST./x")
+
+
+def test_parse_gdata_skips_an_infinite_rating():
+    data = json.loads(fixture_bytes("gdata.json"))
+    before = len(parse_gdata(json.dumps(data).encode()))
+    data["gmetadata"][0]["rating"] = "inf"
+    posts = parse_gdata(json.dumps(data).encode())
+    assert len(posts) == before - 1
+    assert data["gmetadata"][0]["gid"] not in [p.album["gid"] for p in posts]

@@ -258,9 +258,9 @@ class MainWindow(QMainWindow):
         tab.search()
         return tab
 
-    def resolve(self, post: Post, cb):
-        """Find the post's file address for viewing, then cb(post, error or None)."""
-        self.sites[post.site].resolve(post, False, cb)
+    def resolve(self, post: Post, cb, alive=None):
+        """Find the post's file address for viewing, then cb(post, error or None); alive() as in Site.resolve."""
+        self.sites[post.site].resolve(post, False, cb, alive)
 
     def open_viewer(self, post: Post, background: bool, origin: SearchTab | None = None,
                     model: ResultsModel | None = None):

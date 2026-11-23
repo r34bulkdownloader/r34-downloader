@@ -33,7 +33,7 @@ def resolve_error(err: str) -> str:
     return IMAGE_LIMIT_TEXT if err == "IMAGE_LIMIT" else err
 
 
-def known(post: Post, cb):
+def known(post: Post, cb, alive=None):
     cb(post, None)  # resolve=None: file_url is already known
 
 
@@ -438,7 +438,8 @@ class ViewerTab(QWidget):
         self.update_favorite()
         self.title_changed.emit(post.label)
         token = self._load_id
-        self._resolve(post, lambda p, err: self._on_resolved(token, p, err))
+        self._resolve(post, lambda p, err: self._on_resolved(token, p, err),
+                      alive=lambda: token == self._load_id and not self._released and post is self.post)
 
     def _on_resolved(self, token: int, post: Post, err: str | None):
         if token != self._load_id or self._released or post is not self.post:

@@ -106,3 +106,45 @@ def test_infinite_scroll_stops_at_cap_and_load_more_continues(qapp, tmp_path, mo
     assert asked == [None, 1, 2, 3] and not tab.more_btn.isVisibleTo(tab)
     tab.site.total_found.emit(tab.model.generation, 4567, True)
     assert "about 4,567 results in all" in tab.count_label.text()
+
+
+def _win(tmp_path, monkeypatch):
+    from r34dl import config
+    from r34dl.ui import MainWindow
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.save({**config.DEFAULTS, "user_id": "1", "api_key": "k"})
+    return MainWindow()
+
+
+def _titles(win):
+    return [win.tabs.tabText(i) for i in range(win.tabs.count())]
+
+
+def test_new_tabs_open_after_the_current_one(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    win = _win(tmp_path, monkeypatch)
+    assert win.tabs.isMovable()
+    for t in ("A", "B", "C"):
+        win.add_tab(QWidget(), t)  # each opened in front: each goes after the one before
+    assert _titles(win)[1:] == ["A", "B", "C"]
+    win.tabs.setCurrentIndex(1)  # back on A
+    win.add_tab(QWidget(), "A1")
+    assert _titles(win)[1:] == ["A", "A1", "B", "C"]
+    win.tabs.setCurrentIndex(2)  # on A1: background tabs from here line up after it, in opening order
+    win.add_tab(QWidget(), "x", background=True)
+    win.add_tab(QWidget(), "y", background=True)
+    assert _titles(win)[1:] == ["A", "A1", "x", "y", "B", "C"] and win.tabs.currentIndex() == 2
+
+
+def test_first_search_tab_stays_open_wherever_it_is_moved(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    win = _win(tmp_path, monkeypatch)
+    other = QWidget()
+    other.release = lambda: None
+    win.add_tab(other, "other")
+    win.tabs.tabBar().moveTab(0, 1)  # the first search tab is now second
+    assert win.tabs.indexOf(win.first) == 1
+    win._close_tab(1)
+    assert win.tabs.indexOf(win.first) == 1  # not closed
+    win._close_tab(0)
+    assert win.tabs.indexOf(other) == -1 and win.tabs.count() == 1

@@ -110,9 +110,10 @@ Names are cleaned for the file system and shortened if too long; an existing fil
 
 Pick **e-hentai** in the site picker above the tag boxes. Everything works without an account.
 
-- **Search** with the same include/exclude boxes. e-hentai tags have namespaces and may contain spaces, so put
-  one per line or separate them with commas: `artist:name`, `female:long hair`, `language:english`. The grid
-  shows one cover per gallery with its page count; scrolling loads more. The blacklist, saved searches and
+- **Search** works like the site's own search box: words match gallery titles, and tags can go in too, e.g.
+  `my title language:english female:"long hair$"`. Clicking a tag's Include adds it in that form. The exclude
+  box takes tags, one per line or comma-separated (spaces are part of the tag): `male:yaoi`. The grid shows one
+  cover per gallery with its page count; scrolling loads more. The blacklist, saved searches and
   followed tags are kept per site.
 - **Open a gallery:** a gallery tab with its title, category and tags, and its pages as a thumbnail grid (ticking,
   **Download**, **Download as folder/ZIP…**, **Open together** and **Slideshow** work as in a search).

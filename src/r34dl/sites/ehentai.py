@@ -49,10 +49,26 @@ def _term(tag: str, neg: bool) -> str:
     return "-" + term if neg else term
 
 
+def include_term(tag: str) -> str:
+    """A tag as the search box needs it (ns:"name$"), for adding a clicked tag to the free-text search."""
+    return _term(tag, False)
+
+
 def build_query(include: str, exclude: str, blacklist: list[str]) -> str:
-    terms = [_term(t, False) for t in split_tags(include)]
+    """include is free text, sent as typed (like the site's search box: words match titles, ns:"tag$" matches
+    tags); exclude and the blacklist are tags."""
+    terms = [" ".join(include.split())]
     terms += [_term(t, True) for t in split_tags(exclude) + [b.strip() for b in blacklist if b.strip()]]
     return " ".join(t for t in terms if t)
+
+
+def parse_total(html: str) -> tuple[int, bool] | None:
+    """(result count, approximate) from a search page's "Found about 385,146 results." / "No hits found";
+    None when the page says neither."""
+    if "No hits found" in html:
+        return 0, False
+    m = re.search(r"Found (about )?([\d,]+) results?", html)
+    return (int(m.group(2).replace(",", "")), bool(m.group(1))) if m else None
 
 
 def search_url(query: str, cursor: int | None) -> str:

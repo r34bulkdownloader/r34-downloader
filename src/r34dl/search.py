@@ -29,6 +29,7 @@ if TYPE_CHECKING:  # type hints only: ui imports this module
 log = logging.getLogger(__name__)
 
 _generations = itertools.count(1)  # search generations are unique across all search tabs
+AUTO_PAGES = 10  # infinite scroll loads this many pages on its own, then waits for "Load more"
 
 
 class SearchTab(QWidget):
@@ -48,6 +49,8 @@ class SearchTab(QWidget):
         self._cursor = None  # cursor of the page asked for last (None = first page)
         self._next_cursor = None  # infinite scroll: cursor of the next page
         self._pages = 0  # infinite scroll: pages loaded so far
+        self._auto_limit = AUTO_PAGES  # infinite scroll stops loading by itself at this many pages
+        self._total: tuple[int, bool] | None = None  # the site's result count for this search, approximate
         self._inflight = False
         self._failed_shown: tuple | None = None
         self._hidden = 0  # posts left out of this search because they were already downloaded
@@ -160,6 +163,12 @@ class SearchTab(QWidget):
         self.view.context_requested.connect(self._post_menu)
         self.view.zoom_requested.connect(win.zoom_thumbs)
         right.addWidget(self.view, 1)
+        self.more_btn = QPushButton(f"Load more ({AUTO_PAGES} pages)")
+        self.more_btn.setToolTip("Scrolling stops loading new pages by itself after a while, so a big search "
+                                 "doesn't load everything")
+        self.more_btn.clicked.connect(self._load_more_pages)
+        self.more_btn.hide()
+        right.addWidget(self.more_btn)
         self.page_bar = QWidget()
         pb = QHBoxLayout(self.page_bar)
         pb.setContentsMargins(0, 0, 0, 0)
@@ -201,7 +210,8 @@ class SearchTab(QWidget):
         self.model.favorites = self.win.favorites[name]  # shared dict: one favorites list per site for every tab
 
     def _connect_site(self, on: bool):
-        for sig, slot in ((self.site.page_ready, self._on_site_page), (self.site.failed, self._on_failed)):
+        for sig, slot in ((self.site.page_ready, self._on_site_page), (self.site.failed, self._on_failed),
+                          (self.site.total_found, self._on_total)):
             if on:
                 sig.connect(slot)
                 continue
@@ -277,6 +287,9 @@ class SearchTab(QWidget):
         self._tags = self.site.build_query(self._include, self.exclude_edit.toPlainText(), server_side)
         self._cursor = self._next_cursor = None
         self._pages = 0
+        self._auto_limit = AUTO_PAGES
+        self._total = None
+        self.more_btn.hide()
         self._inflight = False
         self._failed_shown = None
         self._hidden = 0
@@ -350,7 +363,7 @@ class SearchTab(QWidget):
         self._thumb_queue.extend(new)
         self._pump_thumbs()
         self._update_counts()
-        if not self._paged and not self.model.posts and not self.model.exhausted:
+        if not self._paged and not self.model.posts and not self.model.exhausted and not self._at_auto_limit():
             self._fetch_next()  # whole page was hidden; scrolling can't trigger more with an empty grid
         QTimer.singleShot(0, self, self._maybe_load_more)  # tied to the tab: dropped if it's closed first
         self.fetch_finished.emit(True)
@@ -388,11 +401,27 @@ class SearchTab(QWidget):
         else:
             self._fetch_next()
 
+    def _at_auto_limit(self) -> bool:
+        """Infinite scroll has loaded its share of pages: show "Load more" instead of loading on."""
+        stop = not self._paged and not self.model.exhausted and self._pages >= self._auto_limit
+        self.more_btn.setVisible(stop and not self._inflight)
+        return stop
+
+    def _load_more_pages(self):
+        self._auto_limit = self._pages + AUTO_PAGES
+        self.more_btn.hide()
+        self._fetch_next()
+
+    def _on_total(self, gen: int, count, approx: bool):
+        if gen == self.model.generation and not self._closed:
+            self._total = (count, approx)
+            self._update_counts()
+
     def _maybe_load_more(self, *_):
         if self._closed:
             return
         self._update_counts()  # the "Page X of Y" indicator follows the scroll position
-        if self._paged or self._inflight or self.model.exhausted or not self.model.posts:
+        if self._paged or self._inflight or self.model.exhausted or not self.model.posts or self._at_auto_limit():
             return
         sb = self.view.verticalScrollBar()
         if sb.maximum() - sb.value() <= 1.5 * self.view.viewport().height():
@@ -477,6 +506,9 @@ class SearchTab(QWidget):
         hidden = f" · {self._hidden} already downloaded (hidden)" if self._hidden else ""
         hidden += f" · {self._blacklisted} hidden by blacklist" if self._blacklisted else ""
         loading = " · loading…" if self._inflight else ""
+        if self._total is not None:
+            count, approx = self._total
+            loading = f" · {'about ' if approx else ''}{count:,} result{'' if count == 1 else 's'} in all{loading}"
         if self._paged:
             page = f"Page {self._page + 1}"
             self.count_label.setText(f"{page} · {len(self.model.posts)} posts · {n} selected{hidden}{loading}")
@@ -496,10 +528,12 @@ class SearchTab(QWidget):
     def add_tag(self, box: str, tag: str):
         """Append a tag to this tab's include or exclude box (one per line, no duplicates)."""
         edit = self.include_edit if box == "include" else self.exclude_edit
-        tags = re.split(r"[\s,]+", edit.toPlainText())
-        if tag not in tags:
-            text = edit.toPlainText().rstrip()
-            edit.setPlainText((text + "\n" if text else "") + tag)
+        term = self.site.include_term(tag) if box == "include" else tag  # e-hentai's search box wants ns:"tag$"
+        text = edit.toPlainText()
+        present = term in text if term != tag else tag in re.split(r"[\s,]+", text)  # quoted terms hold spaces
+        if not present:
+            text = text.rstrip()
+            edit.setPlainText((text + "\n" if text else "") + term)
 
 
 class FavoritesTab(SearchTab):

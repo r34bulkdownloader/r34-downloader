@@ -210,7 +210,7 @@ def test_include_exclude_from_gallery_viewer(win, monkeypatch):
     assert new is not gt and new.site.name == "e-hentai" and new.exclude_edit.toPlainText().endswith("male:yaoi")
     win.first.site_box.setCurrentIndex(win.first.site_box.findData("e-hentai"))
     win._tag_action(gt, "include", "female:x")  # first tab is on e-hentai now: it gets it
-    assert win.first.include_edit.toPlainText().endswith("female:x")
+    assert win.first.include_edit.toPlainText().endswith('female:"x$"')  # quoted for the search box
     assert gt.include_edit.toPlainText() == "" and gt.exclude_edit.toPlainText() == ""
 
 

@@ -128,10 +128,14 @@ class EhentaiSite(Site):
     name = "e-hentai"
     label = "e-hentai"
     page_jump = False
-    tag_hint = ("One tag per line or comma-separated; spaces are part of the tag. Namespaces work: "
-                "<b>artist:name</b>, <b>female:long hair</b>, <b>language:english</b>.")
-    include_placeholder = "for example:\nfemale:long hair\nlanguage:english"
+    tag_hint = ("<b>Search</b> works like the site's search box: words match gallery titles, and tags use "
+                '<b>female:"long hair$"</b> or <b>language:english</b>. '
+                "<b>Exclude</b>: one tag per line or comma-separated; spaces are part of the tag.")
+    include_placeholder = 'for example:\nmy title words\nlanguage:english female:"long hair$"'
     exclude_placeholder = "for example:\nmale:yaoi"
+
+    def include_term(self, tag: str) -> str:
+        return eh.include_term(tag)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -151,7 +155,11 @@ class EhentaiSite(Site):
         def on_search(status, body, err):
             if err:
                 return self.failed.emit(generation, err)
-            pairs, nxt = eh.parse_search(body.decode("utf-8", "replace"))
+            html = body.decode("utf-8", "replace")
+            pairs, nxt = eh.parse_search(html)
+            total = eh.parse_total(html) if cursor is None else None
+            if total is not None:
+                self.total_found.emit(generation, total[0], total[1])
             self._gdata(pairs, [], generation, nxt)
         self.queue.get(eh.search_url(query, cursor), on_search)
 

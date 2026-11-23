@@ -24,6 +24,7 @@ class Rule34Site(Site):
         self._pids: dict[int, int] = {}  # generation -> pid asked for (one request per search at a time)
         self.api.page_ready.connect(self._on_page)
         self.api.failed.connect(self._on_failed)
+        self.api.counted.connect(lambda gen, n: self.total_found.emit(gen, n, False))
 
     def build_query(self, include: str, exclude: str, blacklist: list[str]) -> str:
         return api.build_tags(include, " ".join([exclude, *blacklist]))
@@ -32,6 +33,8 @@ class Rule34Site(Site):
         pid = cursor or 0
         self._pids[generation] = pid
         self.api.fetch(query, pid, generation, cfg["user_id"], cfg["api_key"])
+        if cursor is None:  # first page of a search: also ask how many there are in all
+            self.api.count(query, generation, cfg["user_id"], cfg["api_key"])
 
     def _on_page(self, gen: int, posts: list, raw: int):
         pid = self._pids.pop(gen, 0)

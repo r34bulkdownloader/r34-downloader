@@ -18,9 +18,14 @@ class Site(QObject):
 
     page_ready = Signal(int, list, object)  # generation, posts, next cursor (None = no more)
     failed = Signal(int, str)  # generation, message
+    total_found = Signal(int, object, bool)  # generation, result count of the whole search, approximate
 
     def split_tags(self, text: str) -> list[str]:
         return api.split_tags(text)
+
+    def include_term(self, tag: str) -> str:
+        """A clicked tag as it goes into the include box."""
+        return tag
 
     def build_query(self, include: str, exclude: str, blacklist: list[str]) -> str:
         raise NotImplementedError

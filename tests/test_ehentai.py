@@ -7,7 +7,7 @@ import pytest
 from r34dl.models import TAG_KINDS, Post
 from r34dl.sites.ehentai import (EH, GalleryWarning, ImageLimit, build_query, gallery_url, gdata_body,
                                  parse_gallery, parse_gdata, parse_picture, parse_search, safe_image_url,
-                                 search_url, split_tags)
+                                 search_url, split_tags, include_term, parse_total)
 
 FIX = Path(__file__).parent / "fixtures" / "eh"
 
@@ -28,14 +28,28 @@ def test_split_tags():
     assert split_tags(" female:big breasts , artist:foo\n\n other ") == ["female:big breasts", "artist:foo", "other"]
 
 
-def test_build_query_quotes_spaces():
-    q = build_query('female:big breasts\nartist:"foo"', "language:english", ["guro"])
-    assert q == 'female:"big breasts$" artist:"foo$" -language:"english$" -"guro$"'
+def test_build_query_search_is_free_text_excludes_are_tags():
+    # the search box goes as typed, like the site's (title words and tags); lines just become spaces
+    q = build_query('my title\n  female:"big breasts$"', "language:english, male:big penis", ["guro"])
+    assert q == 'my title female:"big breasts$" -language:"english$" -male:"big penis$" -"guro$"'
 
 
-def test_build_query_leading_minus_excludes():
-    assert build_query("-male:yaoi, x", "", []) == '-male:"yaoi$" "x$"'
-    assert build_query('-, female:, ""', "", []) == ""
+def test_build_query_empty_parts_dropped():
+    assert build_query("  \n ", '-, female:, ""', []) == ""
+    assert build_query("", "", ["x"]) == '-"x$"'
+
+
+def test_include_term_quotes_a_clicked_tag():
+    assert include_term("female:long hair") == 'female:"long hair$"'
+    assert include_term("solo") == '"solo$"'
+
+
+def test_parse_total():
+    assert parse_total("<p>Found about 385,146 results. </p>") == (385146, True)
+    assert parse_total("<p>Found 12 results.</p>") == (12, False)
+    assert parse_total("<p>Found 1 result.</p>") == (1, False)
+    assert parse_total("<p>No hits found</p>") == (0, False)
+    assert parse_total(fixture("search.html")) is None  # trimmed fixture has no count line
 
 
 def test_search_url():

@@ -352,6 +352,8 @@ class MainWindow(QMainWindow):
     def _close_tab(self, i: int):
         if self.tabs.widget(i) is not self.first:  # the first search tab stays (it may be moved anywhere)
             w = self.tabs.widget(i)
+            if w is self._last_opened or w is self._opened_from:  # it's deleted soon: add_tab must not use it
+                self._opened_from = self._last_opened = None
             self.tabs.removeTab(i)
             # Draw the tab that's now showing *before* tearing the old one down: stopping a stream can take a
             # moment, and until the window repaints, the closed tab's picture stays on screen.

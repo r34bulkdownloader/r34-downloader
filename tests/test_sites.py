@@ -148,3 +148,23 @@ def test_first_search_tab_stays_open_wherever_it_is_moved(qapp, tmp_path, monkey
     assert win.tabs.indexOf(win.first) == 1  # not closed
     win._close_tab(0)
     assert win.tabs.indexOf(other) == -1 and win.tabs.count() == 1
+
+
+def test_opening_after_the_last_opened_tab_was_closed(qapp, tmp_path, monkeypatch):
+    # bug: closing the tab opened last left a reference to the deleted tab; the next open from the same tab
+    # raised "Internal C++ object already deleted" and nothing opened
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QWidget
+    win = _win(tmp_path, monkeypatch)
+
+    def tab():
+        w = QWidget()
+        w.release = lambda: None
+        return w
+    a = tab()
+    win.add_tab(a, "A", background=True)  # opened from the first tab, which stays current
+    win._close_tab(win.tabs.indexOf(a))
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)  # the closed tab is really deleted now
+    b = tab()
+    win.add_tab(b, "B", background=True)
+    assert _titles(win) == ["Search", "B"]

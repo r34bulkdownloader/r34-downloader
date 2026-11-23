@@ -94,6 +94,8 @@ class MainWindow(QMainWindow):
         self._eh_failed = 0  # e-hentai pictures that couldn't be resolved (the downloader never saw them)
         self._last_progress = (0, 0, 0, 0)
         self._zip_threads: list[threading.Thread] = []  # ZIPs being packed in the background
+        self._opened_from: QWidget | None = None  # the tab the last new tab was opened from…
+        self._last_opened: QWidget | None = None  # …and that new tab: the next one from there goes after it
         self.zip_written.connect(self._on_zip_written)
         self.slideshow: Slideshow | None = None  # the running one (one at a time)
         self.downloader = Downloader(self)
@@ -190,6 +192,7 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)  # drag tabs to reorder them
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.setCentralWidget(self.tabs)
         site = self.cfg["site"] if self.cfg["site"] in self.sites else "rule34.xxx"
@@ -244,9 +247,7 @@ class MainWindow(QMainWindow):
         exclude = (self.first.exclude_edit.toPlainText() if site == self.first.site.name
                    else config.site_cfg(self.cfg, site)["exclude"])
         tab = SearchTab(self, include, exclude, site)
-        i = self.tabs.addTab(tab, tab.title())
-        if not background:
-            self.tabs.setCurrentIndex(i)
+        self.add_tab(tab, tab.title(), background)
         if include.strip():
             tab.search()
         elif focus:
@@ -255,11 +256,22 @@ class MainWindow(QMainWindow):
 
     def open_gallery(self, gallery: Post, background: bool) -> GalleryTab:
         tab = GalleryTab(self, gallery)
-        i = self.tabs.addTab(tab, tab.title())
-        if not background:
-            self.tabs.setCurrentIndex(i)
+        self.add_tab(tab, tab.title(), background)
         tab.search()
         return tab
+
+    def add_tab(self, tab: QWidget, title: str, background: bool = False) -> int:
+        """Insert a new tab right after the current one, like a web browser. Several opened from the same tab
+        (e.g. Ctrl+click on a few posts) line up in the order they were opened."""
+        cur = self.tabs.currentWidget()
+        anchor = cur
+        if self._opened_from is cur and self._last_opened is not None and self.tabs.indexOf(self._last_opened) >= 0:
+            anchor = self._last_opened
+        i = self.tabs.insertTab(self.tabs.indexOf(anchor) + 1 if anchor is not None else self.tabs.count(), tab, title)
+        self._opened_from, self._last_opened = cur, tab
+        if not background:
+            self.tabs.setCurrentIndex(i)
+        return i
 
     def resolve(self, post: Post, cb, alive=None):
         """Find the post's file address for viewing, then cb(post, error or None); alive() as in Site.resolve."""
@@ -287,9 +299,7 @@ class MainWindow(QMainWindow):
         tab.update_favorite()
         tab.favorite_toggled.connect(self.toggle_favorite)
         tab.tag_action.connect(lambda action, tag: self._tag_action(tab.origin, action, tag))
-        i = self.tabs.addTab(tab, post.label)
-        if not background:
-            self.tabs.setCurrentIndex(i)
+        self.add_tab(tab, post.label, background)
 
     def start_slideshow(self, tab: SearchTab):
         """Ask for the options, then show the tab's posts (or its ticked ones) full screen."""
@@ -323,7 +333,7 @@ class MainWindow(QMainWindow):
             return
         tab = TogetherTab(posts, self.nam, resolve=self.resolve)
         tab.open_requested.connect(lambda p: self.open_viewer(p, False, None, tab.model))
-        self.tabs.setCurrentIndex(self.tabs.addTab(tab, f"Together ({len(posts)})"))
+        self.add_tab(tab, f"Together ({len(posts)})")
 
     def _tag_action(self, origin: SearchTab, action: str, tag: str):
         target = origin if origin is not None else self.first  # origin is None once its tab closed
@@ -340,7 +350,7 @@ class MainWindow(QMainWindow):
             target.add_tag(action, tag)
 
     def _close_tab(self, i: int):
-        if i > 0:
+        if self.tabs.widget(i) is not self.first:  # the first search tab stays (it may be moved anywhere)
             w = self.tabs.widget(i)
             self.tabs.removeTab(i)
             # Draw the tab that's now showing *before* tearing the old one down: stopping a stream can take a
@@ -450,7 +460,7 @@ class MainWindow(QMainWindow):
                 self.tabs.setCurrentIndex(i)
                 return
         tab = FavoritesTab(self)
-        self.tabs.setCurrentIndex(self.tabs.addTab(tab, tab.title()))
+        self.add_tab(tab, tab.title())
         tab.search()
 
     def _load_favorites(self, entries: list[dict], site: str):
@@ -482,6 +492,8 @@ class MainWindow(QMainWindow):
                 w.favorite_changed(post)
             elif isinstance(w, SearchTab) and w.site.name == post.site:
                 w.model.mark_changed(post.id)
+                if isinstance(w, GalleryTab):
+                    w.update_favorite()
             elif isinstance(w, ViewerTab):
                 w.update_favorite()
 

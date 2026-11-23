@@ -482,6 +482,8 @@ class MainWindow(QMainWindow):
                 w.favorite_changed(post)
             elif isinstance(w, SearchTab) and w.site.name == post.site:
                 w.model.mark_changed(post.id)
+                if isinstance(w, GalleryTab):
+                    w.update_favorite()
             elif isinstance(w, ViewerTab):
                 w.update_favorite()
 

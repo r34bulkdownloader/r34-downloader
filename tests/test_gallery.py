@@ -409,3 +409,29 @@ def test_remembered_include_belongs_to_the_site_it_was_typed_for(qapp, monkeypat
     w.first.include_edit.setPlainText("female:hat")
     w._store_tags()
     assert config.site_cfg(w.cfg, "e-hentai")["include"] == "female:hat" and w.cfg["include"] == "long_hair"
+
+
+def test_gallery_tab_favorite_button(win, monkeypatch):
+    monkeypatch.setattr(win.sites["e-hentai"], "fetch_gallery", lambda *a: None)
+    g = gallery()
+    gt = win.open_gallery(g, False)
+    assert gt.fav_btn.text() == "♡ Favorite gallery"
+    gt.fav_btn.click()
+    assert g.id in win.favorites["e-hentai"] and gt.fav_btn.text() == "♥ Favorited gallery"
+    win.toggle_favorite(g)  # unfavorited elsewhere (e.g. the search grid's menu): the button follows
+    assert g.id not in win.favorites["e-hentai"] and gt.fav_btn.text() == "♡ Favorite gallery"
+
+
+def test_gallery_tab_download_buttons_take_the_whole_gallery(win, monkeypatch):
+    monkeypatch.setattr(win.sites["e-hentai"], "fetch_gallery", lambda *a: None)
+    g = gallery()
+    gt = win.open_gallery(g, False)
+    calls = []
+    monkeypatch.setattr(win, "download_posts", lambda posts, search="", *a, **k: calls.append(("files", posts, search)))
+    monkeypatch.setattr(win, "download_album", lambda posts, search, zipped: calls.append((zipped, posts, search)))
+    gt.gallery_dl_btn.click()
+    acts = gt.gallery_dl_btn.menu().actions()
+    assert [a.text() for a in acts] == ["Download gallery", "Download gallery as folder…", "Download gallery as ZIP…"]
+    acts[1].trigger()
+    acts[2].trigger()
+    assert calls == [("files", [g], "A gallery"), (False, [g], "A gallery"), (True, [g], "A gallery")]

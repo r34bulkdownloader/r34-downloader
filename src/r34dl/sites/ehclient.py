@@ -264,6 +264,7 @@ class EhDownloadFeeder(QObject):
     paused = Signal(str)  # "IMAGE_LIMIT" or BLOCKED_MSG: stopped, the rest is kept until resume()
     failed = Signal(str, str)  # picture page, target: it couldn't be resolved (so ZIP jobs still complete)
     retargeted = Signal(str, str)  # old target, new one: the picture found is another type than the page's name said
+    originals_refused = Signal()  # once: e-hentai answered an original with a page; resized copies from now on
 
     def __init__(self, site: EhentaiSite, downloader, parent=None):
         super().__init__(parent)
@@ -271,10 +272,14 @@ class EhDownloadFeeder(QObject):
         self._jobs: deque = deque()  # (post, target path)
         self._busy: str | bool = False  # True: resolving; a target text: downloading it
         self._current = None  # the job being downloaded, kept for an image-limit answer
+        self._posts: dict[str, Post] = {}  # target -> post, handed to the downloader and not done yet (for retry)
+        self._unresolved: list = []  # (post, target) whose picture page couldn't be resolved
         self._paused = False
+        self._no_originals = False  # set once an original was refused (a wrong login): resized copies only
         self._gen = 0
         downloader.item_done.connect(self._on_item_done)
         downloader.limited.connect(self._on_limited)
+        downloader.refused.connect(self._on_refused)
 
     @property
     def active(self) -> bool:
@@ -295,7 +300,24 @@ class EhDownloadFeeder(QObject):
     def cancel(self) -> None:
         self._gen += 1  # a resolve still waiting in the site queue is dropped there, unsent
         self._jobs.clear()
-        self._busy = self._paused = False
+        self._unresolved.clear()
+        self._busy = self._paused = self._no_originals = False
+
+    def retry_failed(self) -> None:
+        """Failed pictures again, through the paced lookups: their addresses may have expired, and the
+        downloader would send them all at once."""
+        jobs = self._unresolved + [(self._posts.pop(t), t) for t in self.downloader.take_failed(self._posts)]
+        self._unresolved = []
+        for post, _ in jobs:
+            post.album.pop("shown", None)
+            post.album.pop("original", None)
+        if jobs:
+            self.add(jobs)
+
+    def forget_failed(self, under: Path) -> None:
+        """Like Downloader.forget_failed: a finished or cancelled ZIP's folder is gone."""
+        self._unresolved = [(p, t) for p, t in self._unresolved if under not in Path(t).parents]
+        self._posts = {t: p for t, p in self._posts.items() if under not in Path(t).parents}
 
     def _next(self) -> None:
         if self._busy or self._paused or not self._jobs:
@@ -315,8 +337,14 @@ class EhDownloadFeeder(QObject):
         self._jobs.popleft()
         if err:
             log.warning("e-hentai picture not downloaded: %s", api.scrub(err))
+            self._unresolved.append((post, target))
             self.failed.emit(post.page_url, str(target))
             return self._next()
+        if self._no_originals and post.file_url == post.album.get("original"):
+            post.file_url = post.album.get("shown") or post.file_url
+        self._download(post, target)
+
+    def _download(self, post: Post, target) -> None:
         ext = post.ext  # now from the resolved address: a resized copy is often another type (page_1.png -> .webp)
         if ext in _IMAGE_EXT and Path(target).suffix.lower() != f".{ext}":
             new = Path(target).with_suffix(f".{ext}")
@@ -327,6 +355,7 @@ class EhDownloadFeeder(QObject):
         original = (q.logged_in and post.file_url == post.album.get("original")
                     and post.file_url.startswith(eh.EH + "/fullimg"))
         self._busy, self._current = str(target), (post, target)
+        self._posts[str(target)] = post
         self.downloader.add([(post.file_url, target, {b"Cookie": q._cookie})] if original else
                             [(post.file_url, target)])
 
@@ -336,7 +365,28 @@ class EhDownloadFeeder(QObject):
             self._busy, self._paused = False, True
             self.paused.emit("IMAGE_LIMIT")
 
+    def _on_refused(self, url: str, target: str) -> None:
+        if not (self._busy and target == self._busy):
+            return
+        post, _ = self._current
+        shown = post.album.get("shown")
+        if not self._no_originals:
+            self._no_originals = True
+            log.warning("e-hentai refused the original of %s; downloading resized copies instead. "
+                        "Is the e-hentai login in Settings right?", api.scrub(post.page_url))
+            self.originals_refused.emit()
+        if not (isinstance(shown, str) and eh.safe_image_url(shown)):
+            self._busy = False
+            self._posts.pop(target, None)
+            self._unresolved.append((post, target))
+            self.failed.emit(post.page_url, target)
+            return self._next()
+        post.file_url = shown
+        self._download(post, target)
+
     def _on_item_done(self, url: str, target: str, ok: bool) -> None:
+        if ok:
+            self._posts.pop(target, None)
         if self._busy and target == self._busy:
             self._busy = False
             self._next()

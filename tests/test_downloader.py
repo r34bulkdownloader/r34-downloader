@@ -222,17 +222,30 @@ def test_redirect_of_an_original_to_a_private_host_is_refused(qapp, server, tmp_
     assert [p for p, _ in server.cookies] == ["/toloop"]  # the refused address was never asked
 
 
-@pytest.mark.parametrize("path", ["/html", "/to509"])
-def test_original_answered_with_an_error_page_or_509_is_limited(qapp, server, tmp_path, local_ok, path):
+def test_original_redirected_to_509_is_limited(qapp, server, tmp_path, local_ok):
     d = Downloader()
-    done, limited = [], []
+    done, limited, refused = [], [], []
     d.item_done.connect(lambda *a: done.append(a))
     d.limited.connect(lambda url, target: limited.append((url, target)))
-    d.add([(server.url + path, tmp_path / "a.jpg", {b"Cookie": b"c=1"}), (server.url + "/html", tmp_path / "b.htm")])
+    d.refused.connect(lambda url, target: refused.append(url))
+    d.add([(server.url + "/to509", tmp_path / "a.jpg", {b"Cookie": b"c=1"}), (server.url + "/html", tmp_path / "b.htm")])
     run_until_finished(d)
-    assert limited == [(server.url + path, str(tmp_path / "a.jpg"))] and len(done) == 1  # b.htm: not an original
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["b.htm"] and d._failed == []
+    assert limited == [(server.url + "/to509", str(tmp_path / "a.jpg"))] and len(done) == 1  # b.htm: not an original
+    assert refused == [] and sorted(p.name for p in tmp_path.iterdir()) == ["b.htm"] and d._failed == []
     assert "/509.gif" not in [p for p, _ in server.cookies]  # the 509 picture isn't even fetched
+
+
+def test_original_answered_with_an_html_page_is_refused_not_limited(qapp, server, tmp_path, local_ok):
+    # e.g. a wrong or expired login: fullimg answers with a page, not the image-limit picture
+    d = Downloader()
+    done, limited, refused = [], [], []
+    d.item_done.connect(lambda *a: done.append(a))
+    d.limited.connect(lambda url, target: limited.append(url))
+    d.refused.connect(lambda url, target: refused.append((url, target)))
+    d.add([(server.url + "/html", tmp_path / "a.jpg", {b"Cookie": b"c=1"})])
+    run_until_finished(d)
+    assert refused == [(server.url + "/html", str(tmp_path / "a.jpg"))] and limited == [] and done == []
+    assert not list(tmp_path.iterdir()) and d._failed == []
 
 
 def test_original_redirected_on_to_a_509_picture_is_limited(qapp, server, tmp_path, local_ok):

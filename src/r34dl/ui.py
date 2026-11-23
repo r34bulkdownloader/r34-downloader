@@ -101,6 +101,9 @@ class MainWindow(QMainWindow):
         self.feeder.paused.connect(self._on_eh_paused)
         self.feeder.failed.connect(self._on_eh_failed)
         self.feeder.retargeted.connect(self._on_eh_retargeted)
+        self.feeder.originals_refused.connect(lambda: self.statusBar().showMessage(
+            "e-hentai refused an original picture, so resized copies are downloaded instead. "
+            "Check the e-hentai login in Settings.", 30000))
         self.nam = QNetworkAccessManager(self)
         self._build_ui()
         self.downloader.progress.connect(self._on_progress)
@@ -202,7 +205,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximumWidth(260)
         self.progress_label = QLabel("Downloads: idle")
         self.retry_btn = QPushButton("Retry failed")
-        self.retry_btn.clicked.connect(self.downloader.retry_failed)
+        self.retry_btn.clicked.connect(self._retry_failed)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self.cancel_downloads)
         self.resume_btn = QPushButton("Resume e-hentai downloads")
@@ -710,7 +713,7 @@ class MainWindow(QMainWindow):
         failed = f", {job.failed} failed (Settings → Show log… has details)" if job.failed else ""
         if not files:
             shutil.rmtree(job.parts, ignore_errors=True)
-            self.downloader.forget_failed(job.parts)
+            self._forget_failed(job.parts)
             self.statusBar().showMessage(f"ZIP “{job.name}” not created: nothing downloaded{failed}", 15000)
             return
         target = naming.unique_path(job.parts.parent / f"{job.name}.zip", None)
@@ -732,9 +735,19 @@ class MainWindow(QMainWindow):
                                 f"The downloaded files are kept in {job.parts}")
             return
         shutil.rmtree(job.parts, ignore_errors=True)
-        self.downloader.forget_failed(job.parts)  # "Retry failed" can't refill a ZIP that's already written
+        self._forget_failed(job.parts)  # "Retry failed" can't refill a ZIP that's already written
         log.info("saved %s (%d files%s)", target.name, files, f", {job.failed} failed" if job.failed else "")
         self.statusBar().showMessage(f"Saved {target.name}: {files} files{failed}", 15000)
+
+    def _retry_failed(self):
+        self._eh_failed = 0
+        self.feeder.retry_failed()  # first: takes its pictures out of the downloader's failed list
+        self.downloader.retry_failed()
+        self._on_progress(*self._last_progress)
+
+    def _forget_failed(self, parts: Path):
+        self.downloader.forget_failed(parts)
+        self.feeder.forget_failed(parts)
 
     def cancel_downloads(self):
         self._cancels += 1
@@ -749,7 +762,7 @@ class MainWindow(QMainWindow):
         self.downloader.cancel()
         for job in self._zip_jobs:
             shutil.rmtree(job.parts, ignore_errors=True)
-            self.downloader.forget_failed(job.parts)
+            self._forget_failed(job.parts)
         self._zip_jobs.clear()
 
     def _on_item_done(self, url: str, target: str, ok: bool):
@@ -774,7 +787,7 @@ class MainWindow(QMainWindow):
         self.progress_label.setText(f"{done}/{total} · {active} active · {failed + self._eh_failed} failed{waiting}")
 
     def closeEvent(self, e):
-        if self.downloader.active or self.feeder.active:
+        if self.downloader.active or self.feeder.active or self._listings or self._zip_jobs:
             r = QMessageBox.question(self, "Quit", "Downloads are in progress. Cancel them and quit?")
             if r != QMessageBox.Yes:
                 e.ignore()

@@ -309,3 +309,51 @@ def test_cancel_while_listing_a_gallery_queues_nothing(win, monkeypatch, tmp_pat
     waiting[0](pages(gallery(), 1, 3), None)  # a listing that answers anyway
     assert not added and not win.feeder.active and not parts.exists()
     assert not list(tmp_path.glob(".r34-zip-parts-*")) and not list(tmp_path.glob("*.zip"))
+
+
+def test_quitting_while_listing_a_gallery_asks_and_cleans_up(win, monkeypatch, tmp_path):
+    from PySide6.QtGui import QCloseEvent
+    from r34dl import ui
+    win.cfg["save_dir"] = str(tmp_path)
+    site = win.sites["e-hentai"]
+    stopped = []
+    monkeypatch.setattr(site, "list_all_pages", lambda gal, cb: lambda: stopped.append(1))
+    monkeypatch.setattr(ui.QInputDialog, "getText", staticmethod(lambda *a, **k: ("gal", True)))
+    win.download_album([gallery(pages=3)], "", zipped=True)
+    parts = win._zip_jobs[0].parts
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
+    e = QCloseEvent()
+    win.closeEvent(e)
+    assert asked and not e.isAccepted() and parts.exists()  # No: keeps going
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    e = QCloseEvent()
+    win.closeEvent(e)
+    assert e.isAccepted() and stopped == [1] and not parts.exists()
+
+
+def test_retry_failed_sends_ehentai_pictures_back_through_the_paced_lookups(win, monkeypatch, tmp_path):
+    from r34dl.downloader import _Item
+    win.cfg["save_dir"] = str(tmp_path)
+    site = win.sites["e-hentai"]
+    resolved, bad = [], ["Could not read the picture page."]  # only the very first lookup fails
+    monkeypatch.setattr(site, "resolve", lambda post, d, cb, alive=None: resolved.append(post) or cb(
+        post, bad.pop() if bad else None))
+    sent = []
+    monkeypatch.setattr(win.downloader, "_start", lambda it: sent.append(it))
+    a, b = pages(gallery(), 1, 2)
+    win.download_posts([a, b])
+    # a: lookup failed; b: resolved, then its download failed for good
+    assert resolved == [a, b] and win._eh_failed == 1 and len(sent) == 1
+    item = sent[0]
+    win.downloader._running.remove(item)
+    win.downloader._failed.append(item)
+    win.downloader.item_done.emit(item.url, str(item.target), False)
+    b.album["shown"] = "https://h.hath.network/old.jpg"  # expires: must be looked up again
+    sent.clear()
+    resolved.clear()
+    win.retry_btn.click()
+    assert win._eh_failed == 0 and win.downloader._failed == []
+    assert resolved == [a]  # one at a time, paced: b waits for a's download
+    assert len(sent) == 1 and sent[0].url == a.file_url
+    assert "shown" not in b.album

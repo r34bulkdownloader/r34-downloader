@@ -303,6 +303,7 @@ def test_download_resolves_again_when_logged_in_without_a_cached_original(qapp):
 class FakeDownloader(QObject):
     item_done = Signal(str, str, bool)
     limited = Signal(str, str)
+    refused = Signal(str, str)
 
     def __init__(self):
         super().__init__()
@@ -472,6 +473,37 @@ def test_feeder_pauses_when_the_downloader_reports_the_limit(qapp, tmp_path):
     assert paused == ["IMAGE_LIMIT"] and len(site.calls) == 1 and f.active
     f.resume()
     assert site.calls == [pages[0], pages[0]] and len(dl.added) == 2  # the same picture again
+
+
+def test_feeder_falls_back_to_the_resized_copy_when_the_original_is_refused(qapp, tmp_path, caplog):
+    site, dl = _site({"/s/": (200, fix("picture_original.html"))}), FakeDownloader()
+    site.queue.set_login("9", "secretpass")
+    f = ehclient.EhDownloadFeeder(site, dl)
+    paused, notes = [], []
+    f.paused.connect(paused.append)
+    f.originals_refused.connect(lambda: notes.append(1))
+    pages = _pages(2)
+    for p in pages:
+        p.page_url = _page().page_url
+    f.add([(pages[0], tmp_path / "a.png"), (pages[1], tmp_path / "b.png")])
+    spin_until(lambda: dl.added)
+    assert "/fullimg/" in dl.added[0][0]
+    dl.refused.emit(dl.added[0][0], str(tmp_path / "a.png"))
+    # no pause: the resized copy instead, without the cookie, under its own type
+    assert not paused and len(dl.added) == 2 and notes == [1]
+    assert dl.added[1] == (pages[0].album["shown"], tmp_path / "a.webp")
+    assert "secretpass" not in caplog.text and "login" in caplog.text
+    dl.finish()
+    spin_until(lambda: len(dl.added) == 3)
+    assert dl.added[2] == (pages[1].album["shown"], tmp_path / "b.webp")  # the rest of the batch: no original
+    assert notes == [1] and not paused
+
+
+def test_window_notes_refused_originals_once_in_the_status_bar(qapp):
+    from r34dl.ui import MainWindow
+    win = MainWindow()
+    win.feeder.originals_refused.emit()
+    assert "login" in win.statusBar().currentMessage() and not win.resume_btn.isVisibleTo(win)
 
 
 def test_queue_too_fast_page_is_an_error_and_holds_the_queue(qapp):

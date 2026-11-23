@@ -25,7 +25,7 @@ class _Item:
         self.url = url  # as queued: item_done reports this one
         self.fetch_url = url  # where a redirect sent us
         self.headers = headers or {}
-        self.original = bool(headers)  # an e-hentai original: its answer may be a limit picture or error page
+        self.original = bool(headers)  # an e-hentai original: its answer may be the limit picture or a page
         self.target = target
         self.retries = 0
         self.reply: QNetworkReply | None = None
@@ -44,9 +44,12 @@ class Downloader(QObject):
     # One per queued item: url, target path, ok. ok = the file is now on disk (downloaded, or an identical file
     # was already there); not ok = failed for good after retries. Albums track by target, history by url.
     item_done = Signal(str, str, bool)
-    # An original came back as e-hentai's image-limit picture or an error page: dropped (no file, no item_done,
+    # An original came back as e-hentai's image-limit picture (/509.gif): dropped (no file, no item_done,
     # not in "Retry failed") so the feeder can keep the job and pause.
     limited = Signal(str, str)  # url, target
+    # An original came back as a web page (likely a wrong or expired login): dropped the same way, so the
+    # feeder can get the resized copy instead.
+    refused = Signal(str, str)  # url, target
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -73,6 +76,13 @@ class Downloader(QObject):
         """Drop failed items that were headed into a folder that no longer exists (a finished/cancelled ZIP)."""
         self._failed = [it for it in self._failed if targets_under not in it.target.parents]
         self._emit()
+
+    def take_failed(self, targets) -> list[str]:
+        """Remove the failed items headed for these targets (retried elsewhere); returns their targets."""
+        taken = [str(it.target) for it in self._failed if str(it.target) in targets]
+        self._failed = [it for it in self._failed if str(it.target) not in targets]
+        self._emit()
+        return taken
 
     def retry_failed(self):
         items, self._failed = self._failed, []
@@ -175,9 +185,10 @@ class Downloader(QObject):
             self._error(it)
             return
         ctype = str(it.reply.header(QNetworkRequest.ContentTypeHeader) or "").lower()
-        if it.original and ("text/html" in ctype or it.reply.url().path().endswith("/509.gif")):
+        if it.original and (it.reply.url().path().endswith("/509.gif") or "text/html" in ctype):
+            refused = not it.reply.url().path().endswith("/509.gif")
             self._close(it, remove=True)
-            return self._limited(it)
+            return self._limited(it, refused)
         self._close(it, remove=False)
         try:
             final = unique_path(it.target, it.written)
@@ -205,11 +216,12 @@ class Downloader(QObject):
         self._finish(it, failed=True)  # first, so a listener's forget_failed() sees this item in the failed list
         self.item_done.emit(it.url, str(it.target), False)
 
-    def _limited(self, it: _Item):
-        log.warning("e-hentai sent no picture for %s (image limit or an error page)", scrub(it.url))
+    def _limited(self, it: _Item, refused: bool = False):
+        log.warning("e-hentai sent %s for %s", "a page instead of the original" if refused else "the image-limit picture",
+                    scrub(it.url))
         self._running.remove(it)
         self._total -= 1
-        self.limited.emit(it.url, str(it.target))
+        (self.refused if refused else self.limited).emit(it.url, str(it.target))
         self._pump()
 
     def _retry(self, it: _Item, gen: int):

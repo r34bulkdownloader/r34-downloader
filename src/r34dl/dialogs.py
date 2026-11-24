@@ -337,6 +337,22 @@ class SettingsDialog(QDialog):
         bl.addWidget(self.loop_check)
         outer.addWidget(behaviour)
 
+        backup_box = QGroupBox("Backup")
+        bk = QVBoxLayout(backup_box)
+        bk.addWidget(hint_label("One file with your favorites, saved searches, followed tags, blacklists and settings: "
+                                "keep it as a backup or move it to another computer."))
+        bk_row = QHBoxLayout()
+        export_btn = QPushButton("Export…")
+        export_btn.clicked.connect(lambda: self.parent().export_backup(self))
+        import_btn = QPushButton("Import…")
+        import_btn.clicked.connect(self._ask_import)
+        bk_row.addWidget(export_btn)
+        bk_row.addWidget(import_btn)
+        bk_row.addStretch(1)
+        bk.addLayout(bk_row)
+        outer.addWidget(backup_box)
+        self.import_request: tuple[str, str] | None = None  # (file, "merge"/"replace"), done by the window
+
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         show_log = self.buttons.addButton("Show log…", QDialogButtonBox.HelpRole)
         show_log.clicked.connect(lambda: LogDialog(self).exec())
@@ -533,5 +549,49 @@ class SettingsDialog(QDialog):
         theme.apply(self._theme_before)  # undo the live preview
         super().reject()
 
+    def _ask_import(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import backup", str(Path.home()), "Backup (*.json);;All files (*)")
+        if not path:
+            return
+        box = QMessageBox(QMessageBox.Question, "Import backup",
+                          "<b>Merge</b> adds the file's favorites, saved searches, followed tags, blacklist tags and "
+                          "download history to yours and keeps your other settings.<br><br><b>Replace</b> takes "
+                          "everything from the file: your favorites and settings become the file's.<br><br>"
+                          "Changes not yet saved in this Settings window are discarded.", parent=self)
+        merge = box.addButton("Merge", QMessageBox.AcceptRole)
+        replace = box.addButton("Replace", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(merge)
+        box.exec()
+        if box.clickedButton() in (merge, replace):
+            self.import_request = (path, "merge" if box.clickedButton() is merge else "replace")
+            self.reject()  # the window imports once Settings is closed (Settings would save its older copy)
+
+
     def result_cfg(self) -> dict:
         return dict(self._cfg)
+
+
+class ExportDialog(QDialog):
+    """What to put in a backup besides favorites and settings."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export backup")
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint_label("Your favorites, saved searches, followed tags, blacklists and settings go in the "
+                                 "file. Add these too if you like:"))
+        self.history_check = QCheckBox("Download history (the green ↓ marks)")
+        self.history_check.setChecked(True)
+        self.login_check = QCheckBox("My logins (rule34.xxx User ID and API key, e-hentai login)")
+        warn = hint_label("Logins are stored in the file as plain text, readable by anyone who gets the file. "
+                          "Keep it private.")
+        warn.setVisible(False)
+        self.login_check.toggled.connect(warn.setVisible)
+        for w in (self.history_check, self.login_check, warn):
+            lay.addWidget(w)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Export…")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)

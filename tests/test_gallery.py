@@ -468,3 +468,32 @@ def test_search_tab_offers_try_again_after_a_failed_page(win, monkeypatch):
     tab._fetch_next()
     tab._on_failed(tab.model.generation, "network error")
     assert tab.more_btn.isVisibleTo(tab) and tab.more_btn.text() == "Try again"
+
+
+def _r34(i, sample):
+    return Post(i, "h", f"https://x/{i}.full", f"https://x/{i}-small.jpg", sample, ["a"], "s", 0, 1, 1)
+
+
+def test_sharper_thumbnails_at_big_sizes(win):
+    tab = win.first
+    tab.model.generation = 5
+    posts = [_r34(1, "https://x/1-sample.jpg"), _r34(2, "https://x/2.mp4")]  # a video's sample is the video
+    tab.model.append(posts)
+    tab._thumb_queue.extend(posts)
+    tab._pump_thumbs()
+    assert [r.url for r in win.got] == ["https://x/1-small.jpg", "https://x/2-small.jpg"]  # setting off
+
+    def finish():  # the fake thumbnail requests answer, so a new one for the same address is really sent
+        for r in list(win.got):
+            r.finished.emit()
+    finish()
+    win.cfg["sharp_thumbs"] = True
+    tab.set_thumb_size(200)  # not big enough: nothing reloads
+    assert len(win.got) == 2
+    tab.set_thumb_size(300)  # past 250: the still sample replaces the small preview; the video keeps its preview
+    assert [r.url for r in win.got[2:]] == ["https://x/1-sample.jpg", "https://x/2-small.jpg"]
+    finish()
+    tab.set_thumb_size(320)  # still big: no second reload
+    assert len(win.got) == 4
+    tab.set_thumb_size(160)  # back to small previews
+    assert [r.url for r in win.got[4:]] == ["https://x/1-small.jpg", "https://x/2-small.jpg"]

@@ -425,6 +425,7 @@ class MainWindow(QMainWindow):
             ids.clear()
             ids.update(config.load_history(site))
         for tab in self.search_tabs():
+            tab.refresh_thumbs()  # "sharper thumbnails" may have been switched
             tab.view.viewport().update()
 
     # ---- followed tags

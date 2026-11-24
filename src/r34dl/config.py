@@ -23,6 +23,7 @@ DEFAULTS = {
     "start_muted": True,
     "loop_videos": True,
     "hover_preview": True,  # play GIFs/videos in the grid when the mouse rests on them
+    "sharp_thumbs": False,  # big grid sizes: load the post's sample picture instead of the small preview
     "infinite_scroll": True,  # off = one page at a time with Previous/Next
     "thumb_size": 160,
     "theme": "system",  # system / light / dark / black

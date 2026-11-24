@@ -327,6 +327,11 @@ class SettingsDialog(QDialog):
         self.hover_check.setToolTip("Each preview downloads/streams from the site; turn off on slow connections")
         self.hover_check.setChecked(bool(cfg.get("hover_preview", True)))
         bl.addWidget(self.hover_check)
+        self.sharp_check = QCheckBox("Sharper thumbnails at large grid sizes")
+        self.sharp_check.setToolTip("Above 250 px, rule34.xxx thumbnails load the post's bigger sample picture "
+                                    "instead of the small preview. Uses more data.")
+        self.sharp_check.setChecked(bool(cfg.get("sharp_thumbs", False)))
+        bl.addWidget(self.sharp_check)
         self.loop_check = QCheckBox("Loop videos")
         self.loop_check.setChecked(bool(cfg.get("loop_videos", True)))
         bl.addWidget(self.loop_check)
@@ -510,6 +515,7 @@ class SettingsDialog(QDialog):
             remember_include=self.remember_check.isChecked(), hide_downloaded=self.hide_check.isChecked(),
             infinite_scroll=self.infinite_check.isChecked(),
             theme=self.theme_box.currentData(), hover_preview=self.hover_check.isChecked(),
+            sharp_thumbs=self.sharp_check.isChecked(),
         )
         if not self._apply_protection():
             return

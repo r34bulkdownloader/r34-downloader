@@ -125,7 +125,7 @@ class ResultsModel(QAbstractListModel):
         data = self.thumbs.get(post_id)
         if data is None:
             return None
-        key = f"thumb:{self.generation}:{self.thumb_size}:{post_id}"
+        key = f"thumb:{self.generation}:{self.thumb_size}:{post_id}:{len(data)}"  # new bytes = new key
         pm = QPixmapCache.find(key)
         if pm is None:
             pm = QPixmap()

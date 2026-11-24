@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 
 _generations = itertools.count(1)  # search generations are unique across all search tabs
 AUTO_PAGES = 10  # infinite scroll loads this many pages on its own, then waits for "Load more"
+SHARP_FROM = 250  # px: above this grid size, "sharper thumbnails" loads the sample picture
 
 
 class SearchTab(QWidget):
@@ -51,6 +52,7 @@ class SearchTab(QWidget):
         self._next_cursor = None  # infinite scroll: cursor of the next page
         self._pages = 0  # infinite scroll: pages loaded so far
         self._auto_limit = AUTO_PAGES  # infinite scroll stops loading by itself at this many pages
+        self._sharp_tier = False  # thumbnails now loaded are the sample pictures (see refresh_thumbs)
         self._total: tuple[int, bool] | None = None  # the site's result count for this search, approximate
         self._inflight = False
         self._failed_shown: tuple | None = None
@@ -290,6 +292,7 @@ class SearchTab(QWidget):
         self._pages = 0
         self._auto_limit = AUTO_PAGES
         self._total = None
+        self._sharp_tier = self._wants_sharp()
         self.more_btn.hide()
         self._inflight = False
         self._failed_shown = None
@@ -440,24 +443,44 @@ class SearchTab(QWidget):
             self._fetch_next()
 
     # ---- thumbnails
+    def _wants_sharp(self) -> bool:
+        return bool(self.win.cfg.get("sharp_thumbs")) and self.model.thumb_size > SHARP_FROM
+
+    def _thumb_url(self, post: Post) -> str:
+        """The small preview, or at big grid sizes (Settings: sharper thumbnails) the post's sample picture.
+        Only a still image will do: a video's or GIF's sample can be the whole file."""
+        sample = post.sample_url
+        if self._wants_sharp() and re.search(r"\.(jpe?g|png|webp)$", sample.split("?")[0], re.I):
+            return sample
+        return post.preview_url
+
+    def refresh_thumbs(self):
+        """The grid size or the setting crossed the sharp/small line: load the other kind for every post."""
+        if self._wants_sharp() != self._sharp_tier:
+            self._sharp_tier = self._wants_sharp()
+            self._thumb_queue = deque(self.model.posts)
+            self._pump_thumbs()
+
     def _pump_thumbs(self):
         while self._thumb_active < MAX_THUMBS and self._thumb_queue:
             post = self._thumb_queue.popleft()
-            if not post.preview_url:
+            url = self._thumb_url(post)
+            if not url:
                 continue
             gen = self.model.generation
-            key = (gen, post.preview_url)
+            key = (gen, url)
             if key in self._thumb_waiting:  # e-hentai: one sprite sheet holds many pages' thumbnails
                 self._thumb_waiting[key].append(post)
                 continue
             self._thumb_waiting[key] = [post]
-            req = api.request(post.preview_url)
+            req = api.request(url)
             reply = self.win.nam.get(req)
             self._thumb_active += 1
             self._thumb_replies.add(reply)
-            reply.finished.connect(lambda r=reply, p=post, g=gen: self._thumb_done(r, p, g))
+            reply.finished.connect(lambda r=reply, p=post, g=gen, u=url: self._thumb_done(r, p, g, u))
 
-    def _thumb_done(self, reply: QNetworkReply, post: Post, gen: int):
+    def _thumb_done(self, reply: QNetworkReply, post: Post, gen: int, url: str | None = None):
+        url = url or post.preview_url
         from .gallery import crop_sprite  # here: gallery imports this module
         self._thumb_active -= 1
         self._thumb_replies.discard(reply)
@@ -465,7 +488,7 @@ class SearchTab(QWidget):
         if not data:
             log.warning("thumbnail failed for post #%s: %s", post.id, reply.errorString())
         reply.deleteLater()
-        for p in self._thumb_waiting.pop((gen, post.preview_url), [post]):
+        for p in self._thumb_waiting.pop((gen, url), [post]):
             if gen == self.model.generation and data:
                 sprite = p.album.get("sprite")
                 thumb = crop_sprite(data, sprite) if sprite else data
@@ -476,6 +499,7 @@ class SearchTab(QWidget):
     # ---- interaction
     def set_thumb_size(self, side: int):
         self.view.set_thumb_size(side)
+        self.refresh_thumbs()
 
     def _post_menu(self, row: int, pos):
         m = self._make_post_menu(self.model.posts[row])
@@ -616,6 +640,7 @@ class FavoritesTab(SearchTab):
         kept = set(self.model.checked)
         self.model.generation = next(_generations)
         self.model.reset()
+        self._sharp_tier = self._wants_sharp()
         self._thumb_queue.clear()
         self._set_filter()
         posts, hidden = [], 0

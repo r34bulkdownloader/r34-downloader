@@ -581,6 +581,35 @@ class FavoritesTab(SearchTab):
         super().__init__(win, "", "")
         self.search_btn.setText("Filter")
         self.together_btn.setToolTip("Open the ticked favorites side by side")
+        self.all_btn = QToolButton()
+        self.all_btn.setText("Download all")
+        self.all_btn.setToolTip("Download every favorite shown (the filter applies), skipping ones already "
+                                "downloaded · arrow: as one folder or ZIP")
+        self.all_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.all_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        menu = QMenu(self.all_btn)
+        menu.addAction("Download all", lambda: self.download_all(None))
+        menu.addAction("Download all as folder…", lambda: self.download_all(False))
+        menu.addAction("Download all as ZIP…", lambda: self.download_all(True))
+        self.all_btn.setMenu(menu)
+        self.all_btn.clicked.connect(lambda: self.download_all(None))
+        self.side_layout.insertWidget(self.side_layout.indexOf(self.dl_btn) + 1, self.all_btn)
+
+    def download_all(self, zipped: bool | None):
+        """Every favorite the grid shows, minus the ones already downloaded. zipped None = loose files."""
+        shown = list(self.model.posts)
+        todo = [p for p in shown if p.id not in self.model.downloaded]
+        skipped = len(shown) - len(todo)
+        if not todo:
+            QMessageBox.information(self, "Download all", "Every favorite shown is already downloaded." if shown
+                                    else "There are no favorites to download.")
+            return
+        if zipped is None:
+            self.win.download_posts(todo, self._include)
+        else:
+            self.win.download_album(todo, self._include, zipped)
+        if skipped:
+            self.win.statusBar().showMessage(f"Skipped {skipped} favorites you already downloaded", 10000)
 
     def title(self) -> str:
         return "♥ Favorites"

@@ -1,4 +1,5 @@
 """The main window: tabs, toolbar, downloads (incl. albums/ZIPs), favorites and followed tags."""
+import datetime
 import logging
 import math
 import shutil
@@ -21,10 +22,10 @@ from PySide6.QtWidgets import (
     QToolBar, QWidget,
 )
 
-from . import api, config, naming, secret, theme
+from . import api, backup, config, naming, secret, theme
 from .downloader import Downloader
 from .models import Post
-from .dialogs import SettingsDialog, UnlockDialog
+from .dialogs import ExportDialog, SettingsDialog, UnlockDialog
 from .gallery import GalleryTab
 from .grid import ResultsModel
 from .search import FavoritesTab, SearchTab
@@ -412,7 +413,11 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.cfg, cur.model.posts[0] if cur.model.posts else None, cur._include, self, self.nam,
                              self._vault, list(self.sites))
         accepted = dlg.exec() == QDialog.Accepted
+        request = dlg.import_request
         dlg.deleteLater()  # its password fields go with it
+        if request is not None:
+            self.import_backup(*request)
+            return
         if accepted:
             self.cfg = dlg.result_cfg()  # not config.load(): protected credentials are only in memory
             self._vault = dlg.vault
@@ -425,7 +430,61 @@ class MainWindow(QMainWindow):
             ids.clear()
             ids.update(config.load_history(site))
         for tab in self.search_tabs():
+            tab.refresh_thumbs()  # "sharper thumbnails" may have been switched
             tab.view.viewport().update()
+
+    # ---- backup
+    def export_backup(self, parent: QWidget | None = None):
+        parent = parent or self
+        dlg = ExportDialog(parent)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        history, logins = dlg.history_check.isChecked(), dlg.login_check.isChecked()
+        dlg.deleteLater()
+        name = f"r34-downloader-backup-{datetime.date.today().isoformat()}.json"
+        path, _ = QFileDialog.getSaveFileName(parent, "Export backup", str(Path.home() / name),
+                                              "Backup (*.json)")
+        if not path:
+            return
+        data = backup.export_data(self.cfg, history, logins)
+        try:
+            backup.write(Path(path), data)
+        except OSError as e:
+            QMessageBox.warning(parent, "Export backup", f"Could not write the backup: {api.scrub(str(e))}")
+            return
+        n = sum(len(v) for v in data["favorites"].values())
+        log.info("exported a backup (%d favorites%s%s)", n, ", history" if history else "", ", logins" if logins else "")
+        self.statusBar().showMessage(f"Exported {n} favorites and your settings to {Path(path).name}", 15000)
+
+    def import_backup(self, path: str, mode: str):
+        try:
+            data = backup.read(Path(path))
+            new, notes = backup.import_data(data, self.cfg, mode, protected=bool(self.cfg["secret"]))
+            config.save(new)
+        except ValueError as e:
+            QMessageBox.warning(self, "Import backup", api.scrub(str(e)))
+            return
+        except OSError as e:
+            log.error("could not import a backup: %s", e)
+            QMessageBox.warning(self, "Import backup", f"Could not import: {api.scrub(str(e))}")
+            return
+        self.cfg = new
+        theme.apply(self.cfg["theme"])
+        self._eh_login()
+        self._refresh_settings_labels()
+        for site in self.sites:
+            self._load_favorites(config.load_favorites(site), site)
+            self.downloaded[site].clear()
+            self.downloaded[site].update(config.load_history(site))
+        for tab in self.search_tabs():
+            if isinstance(tab, FavoritesTab):
+                tab.search()
+            tab.refresh_thumbs()
+            tab.view.viewport().update()
+        n = sum(len(f) for f in self.favorites.values())
+        log.info("imported a backup (%s)", mode)
+        QMessageBox.information(self, "Import backup", "\n\n".join(
+            [f"Imported ({'merged' if mode == 'merge' else 'replaced'}). You now have {n} favorites."] + notes))
 
     # ---- followed tags
     def is_followed(self, tag: str, site: str = "rule34.xxx") -> bool:

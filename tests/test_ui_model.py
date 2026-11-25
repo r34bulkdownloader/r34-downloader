@@ -1685,3 +1685,76 @@ def test_eh_retarget_keeps_history_and_zip_tracking(win, tmp_path):
     assert job.pending == {str(tmp_path / "a.webp"), str(tmp_path / "b.png")}
     assert win._target_ids == {str(tmp_path / "a.webp"): ("e-hentai", 700001)}
     win._zip_jobs.remove(job)
+
+
+def test_download_all_favorites_skips_downloaded(fresh, monkeypatch):
+    monkeypatch.setattr(ui.QNetworkAccessManager, "get", lambda self, req: _NeverReply())
+    for i in (1, 2, 3):
+        fresh.toggle_favorite(_fav_post(i, ("cat",) if i < 3 else ("dog",)))
+    fresh.downloaded["rule34.xxx"].add(2)
+    fresh.open_favorites()
+    tab = fresh.tabs.currentWidget()
+    calls = []
+    monkeypatch.setattr(fresh, "download_posts", lambda posts, search="", *a, **k: calls.append(("files", posts)))
+    monkeypatch.setattr(fresh, "download_album", lambda posts, search, zipped: calls.append((zipped, posts)))
+    acts = tab.all_btn.menu().actions()
+    assert [a.text() for a in acts] == ["Download all", "Download all as folder…", "Download all as ZIP…"]
+    tab.all_btn.click()
+    assert [p.id for p in calls[-1][1]] == [3, 1] and calls[-1][0] == "files"  # newest first; #2 skipped
+    assert "Skipped 1" in fresh.statusBar().currentMessage()
+    acts[2].trigger()
+    assert calls[-1][0] is True and [p.id for p in calls[-1][1]] == [3, 1]
+    tab.include_edit.setPlainText("dog")  # the filter applies
+    tab.search()
+    acts[1].trigger()
+    assert calls[-1][0] is False and [p.id for p in calls[-1][1]] == [3]
+
+
+def test_download_all_when_everything_is_downloaded(fresh, monkeypatch):
+    monkeypatch.setattr(ui.QNetworkAccessManager, "get", lambda self, req: _NeverReply())
+    fresh.toggle_favorite(_fav_post(1))
+    fresh.downloaded["rule34.xxx"].add(1)
+    fresh.open_favorites()
+    tab = fresh.tabs.currentWidget()
+    told = []
+    monkeypatch.setattr(ui.QMessageBox, "information", lambda *a: told.append(a[2]))
+    monkeypatch.setattr(fresh, "download_posts", lambda *a, **k: pytest.fail("nothing should be queued"))
+    tab.all_btn.click()
+    assert told == ["Every favorite shown is already downloaded."]
+
+
+def test_export_then_import_through_the_window(fresh, monkeypatch, tmp_path):
+    from r34dl import backup, config, dialogs
+    monkeypatch.setattr(ui.QNetworkAccessManager, "get", lambda self, req: _NeverReply())
+    fresh.toggle_favorite(_fav_post(1))
+    fresh.cfg["followed"] = ["cat"]
+    out = tmp_path / "b.json"
+    monkeypatch.setattr(dialogs.ExportDialog, "exec", lambda self: ui.QDialog.Accepted)
+    monkeypatch.setattr(ui.QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    fresh.export_backup()
+    data = backup.read(out)
+    assert data["settings"]["api_key"] == "" and [d["id"] for d in data["favorites"]["rule34.xxx"]] == [1]
+    assert "Exported 1 favorites" in fresh.statusBar().currentMessage()
+    # someone else's backup, merged in: their favorite and followed tag join mine, the open Favorites tab shows it
+    data["favorites"]["rule34.xxx"] = [_fav_post(2).to_dict()]
+    data["settings"]["followed"] = ["dog"]
+    backup.write(out, data)
+    fresh.open_favorites()
+    favs = fresh.tabs.currentWidget()
+    told = []
+    monkeypatch.setattr(ui.QMessageBox, "information", lambda *a: told.append(a[2]))
+    fresh.import_backup(str(out), "merge")
+    assert set(fresh.favorites["rule34.xxx"]) == {1, 2} and fresh.cfg["followed"] == ["cat", "dog"]
+    assert {p.id for p in favs.model.posts} == {1, 2}
+    assert config.load()["followed"] == ["cat", "dog"]  # saved
+    assert told and "You now have 2 favorites" in told[0]
+
+
+def test_import_of_a_wrong_file_changes_nothing(fresh, monkeypatch, tmp_path):
+    bad = tmp_path / "x.json"
+    bad.write_text('{"hello": 1}')
+    warned = []
+    monkeypatch.setattr(ui.QMessageBox, "warning", lambda *a: warned.append(a[2]))
+    before = dict(fresh.cfg)
+    fresh.import_backup(str(bad), "replace")
+    assert warned == ["This isn't an R34 Downloader backup."] and fresh.cfg == before

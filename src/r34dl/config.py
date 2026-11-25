@@ -23,6 +23,7 @@ DEFAULTS = {
     "start_muted": True,
     "loop_videos": True,
     "hover_preview": True,  # play GIFs/videos in the grid when the mouse rests on them
+    "sharp_thumbs": False,  # big grid sizes: load the post's sample picture instead of the small preview
     "infinite_scroll": True,  # off = one page at a time with Previous/Next
     "thumb_size": 160,
     "theme": "system",  # system / light / dark / black
@@ -99,6 +100,11 @@ def load() -> dict:
         data = json.loads(path().read_text())
     except (OSError, ValueError):
         return copy.deepcopy(DEFAULTS)
+    return normalize(data)
+
+
+def normalize(data) -> dict:
+    """Settings as the app can use them, from what a file held (also an imported backup)."""
     if not isinstance(data, dict):
         return copy.deepcopy(DEFAULTS)
     # A hand-edited value of the wrong type (e.g. "api_key": 5 or null) falls back to the default.
@@ -165,6 +171,26 @@ def load_favorites(site: str = "rule34.xxx") -> list[dict]:
     except (OSError, ValueError):
         return []
     return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
+
+def write_favorites(entries: list[dict], site: str = "rule34.xxx") -> None:
+    """Replace a site's favorites file (imports)."""
+    _write_private(favorites_path(site), entries)
+
+
+def write_history(ids, site: str = "rule34.xxx") -> None:
+    """Replace a site's download history (imports); atomic, readable only by the user."""
+    p = history_path(site)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write("".join(f"{i}\n" for i in sorted(ids)))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, p)
 
 
 def update_favorites(add: dict | None = None, remove_id: int | None = None, site: str = "rule34.xxx") -> list[dict]:

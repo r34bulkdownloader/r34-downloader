@@ -35,7 +35,8 @@ Current version: **1.2.0**
 
 ### The results grid
 - Thumbnails with a tick box in the corner. **All / None / Invert**, and Shift+click to tick a range.
-- **Size** slider in the toolbar, or Ctrl + mouse wheel over the grid.
+- **Size** slider in the toolbar, or Ctrl + mouse wheel over the grid. **Sharper thumbnails** (Settings): above
+  250 px, rule34.xxx thumbnails use the post's bigger sample picture (more data per thumbnail).
 - **Hover previews:** GIFs and videos play in place when the mouse rests on them (can be turned off).
 - A green **↓** marks posts you downloaded before; a setting hides them from new searches.
 - **♥** marks favorites.
@@ -60,6 +61,12 @@ Current version: **1.2.0**
 - **♥ Favorites** in the toolbar opens your favorites as a grid with the same ticking and downloading.
 - Its tag boxes filter your favorites on this computer (no searching the site). `rating:` and `-tag` work, and
   the blacklist applies.
+- **Download all** downloads every favorite shown (the filter applies) as files, a folder or a ZIP, skipping the
+  ones you already downloaded.
+- **Backup** (Settings → Backup → Export… / Import…): one file with your favorites, saved searches, followed tags,
+  blacklists and settings, to keep or move to another computer. Download history and your logins go in only if
+  you tick them (logins are stored as plain text, so keep that file private). Importing can **merge** (add the
+  file's favorites, searches, tags and history to yours) or **replace** (take everything from the file).
 
 ### Slideshow
 - **▶ Slideshow** on a search tab or Favorites shows the posts full screen, one after another.

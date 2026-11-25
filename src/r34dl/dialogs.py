@@ -14,7 +14,7 @@ from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
-    QVBoxLayout,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import api, config, log as applog, naming, secret, theme
@@ -154,8 +154,15 @@ class SettingsDialog(QDialog):
             700001004, "", "", "", "", [], "", 0, 0, 0, site="e-hentai", kind="page", file_name="004.jpg",
             album={"gid": 7, "token": "", "title": "Some Album", "page": 4, "pages": 120, "category": ""})
         outer = QVBoxLayout(self)
+        self.pages = QTabWidget()  # one tab per topic instead of one column as tall as the screen
+        outer.addWidget(self.pages)
+        tabs = {}
+        for name in ("Accounts", "Downloads", "Appearance && behaviour", "Backup"):
+            page = QWidget()
+            tabs[name] = QVBoxLayout(page)
+            self.pages.addTab(page, name)
 
-        account = QGroupBox("Account")
+        account = QGroupBox("rule34.xxx account")
         form = QFormLayout(account)
         self.paste_edit = QLineEdit()
         self.paste_edit.setPlaceholderText("&api_key=…&user_id=…")
@@ -207,7 +214,7 @@ class SettingsDialog(QDialog):
         form.addRow(self.pw_hint)
         self._account_form = form
         self._update_password_rows()
-        outer.addWidget(account)
+        tabs["Accounts"].addWidget(account)
 
         eh = QGroupBox("e-hentai login (optional)")
         form = QFormLayout(eh)
@@ -227,9 +234,9 @@ class SettingsDialog(QDialog):
             "developer tools (F12) → <b>Storage</b> (Firefox) or <b>Application</b> (Chrome) → <b>Cookies</b>, and "
             "copy the values of <b>ipb_member_id</b> and <b>ipb_pass_hash</b>. They are saved only on this "
             "computer and can be protected with the password above."))
-        outer.addWidget(eh)
+        tabs["Accounts"].addWidget(eh)
 
-        downloads = QGroupBox("Downloads")
+        downloads = QGroupBox("Saving files")
         form = QFormLayout(downloads)
         self.dir_edit = QLineEdit(api.home_short(cfg["save_dir"]))  # ~ instead of the login name; expanded on save
         browse = QPushButton("Browse…")
@@ -266,7 +273,7 @@ class SettingsDialog(QDialog):
         form.addRow("Example", self.preview)
         self.template_edit.textChanged.connect(self._update_preview)
         self.dir_edit.textChanged.connect(self._update_preview)
-        outer.addWidget(downloads)
+        tabs["Downloads"].addWidget(downloads)
 
         blacklist = QGroupBox("Blacklist")
         bll = QVBoxLayout(blacklist)
@@ -289,7 +296,7 @@ class SettingsDialog(QDialog):
         bll.addWidget(hint_label(
             "Posts with any of these tags are never shown, in every search tab on that site. Same rules as the tag boxes. "
             "A blacklisted tag you put in a search's Include box is allowed for that search."))
-        outer.addWidget(blacklist)
+        tabs["Downloads"].addWidget(blacklist)
 
         appearance = QGroupBox("Appearance")
         apl = QHBoxLayout(appearance)
@@ -300,7 +307,7 @@ class SettingsDialog(QDialog):
         self.theme_box.setCurrentIndex(max(0, self.theme_box.findData(cfg.get("theme", "system"))))
         self.theme_box.currentIndexChanged.connect(lambda _: theme.apply(self.theme_box.currentData()))  # preview
         apl.addWidget(self.theme_box, 1)
-        outer.addWidget(appearance)
+        tabs["Appearance && behaviour"].addWidget(appearance)
 
         behaviour = QGroupBox("Behaviour")
         bl = QVBoxLayout(behaviour)
@@ -327,10 +334,33 @@ class SettingsDialog(QDialog):
         self.hover_check.setToolTip("Each preview downloads/streams from the site; turn off on slow connections")
         self.hover_check.setChecked(bool(cfg.get("hover_preview", True)))
         bl.addWidget(self.hover_check)
+        self.sharp_check = QCheckBox("Sharper thumbnails at large grid sizes")
+        self.sharp_check.setToolTip("Above 250 px, rule34.xxx thumbnails load the post's bigger sample picture "
+                                    "instead of the small preview. Uses more data.")
+        self.sharp_check.setChecked(bool(cfg.get("sharp_thumbs", False)))
+        bl.addWidget(self.sharp_check)
         self.loop_check = QCheckBox("Loop videos")
         self.loop_check.setChecked(bool(cfg.get("loop_videos", True)))
         bl.addWidget(self.loop_check)
-        outer.addWidget(behaviour)
+        tabs["Appearance && behaviour"].addWidget(behaviour)
+
+        backup_box = QGroupBox("Backup")
+        bk = QVBoxLayout(backup_box)
+        bk.addWidget(hint_label("One file with your favorites, saved searches, followed tags, blacklists and settings: "
+                                "keep it as a backup or move it to another computer."))
+        bk_row = QHBoxLayout()
+        export_btn = QPushButton("Export…")
+        export_btn.clicked.connect(lambda: self.parent().export_backup(self))
+        import_btn = QPushButton("Import…")
+        import_btn.clicked.connect(self._ask_import)
+        bk_row.addWidget(export_btn)
+        bk_row.addWidget(import_btn)
+        bk_row.addStretch(1)
+        bk.addLayout(bk_row)
+        tabs["Backup"].addWidget(backup_box)
+        for lay in tabs.values():
+            lay.addStretch(1)  # sections sit at the top of their tab
+        self.import_request: tuple[str, str] | None = None  # (file, "merge"/"replace"), done by the window
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         show_log = self.buttons.addButton("Show log…", QDialogButtonBox.HelpRole)
@@ -485,14 +515,17 @@ class SettingsDialog(QDialog):
         self._store_template()
         if (bad := self._bad_site()) is not None:
             self.site_box.setCurrentIndex(self.site_box.findData(bad))  # shows its error in the preview
+            self.pages.setCurrentIndex(1)  # Downloads
             QMessageBox.warning(self, "Bad filename template", f"The file name for {bad} is not valid.")
             return
         eh_login = self.eh_member_edit.text().strip(), self.eh_hash_edit.text().strip()
         if not all(re.fullmatch(r"[\w-]*", v) for v in eh_login):  # cookie values: no spaces or ; (ehclient)
+            self.pages.setCurrentIndex(0)  # Accounts
             QMessageBox.warning(self, "e-hentai login", "The Member ID and Pass hash are made of letters, digits, "
                                 "- and _ only. Copy just the cookie values.")
             return
         if all(eh_login) != any(eh_login):
+            self.pages.setCurrentIndex(0)
             QMessageBox.warning(self, "e-hentai login", "Fill in both the Member ID and the Pass hash, or leave both "
                                 "empty.")
             return
@@ -510,8 +543,10 @@ class SettingsDialog(QDialog):
             remember_include=self.remember_check.isChecked(), hide_downloaded=self.hide_check.isChecked(),
             infinite_scroll=self.infinite_check.isChecked(),
             theme=self.theme_box.currentData(), hover_preview=self.hover_check.isChecked(),
+            sharp_thumbs=self.sharp_check.isChecked(),
         )
         if not self._apply_protection():
+            self.pages.setCurrentIndex(0)  # the password fields are on Accounts
             return
         for w in (self.cur_pw, self.new_pw, self.new_pw2):
             w.clear()  # don't keep password text around
@@ -527,5 +562,49 @@ class SettingsDialog(QDialog):
         theme.apply(self._theme_before)  # undo the live preview
         super().reject()
 
+    def _ask_import(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import backup", str(Path.home()), "Backup (*.json);;All files (*)")
+        if not path:
+            return
+        box = QMessageBox(QMessageBox.Question, "Import backup",
+                          "<b>Merge</b> adds the file's favorites, saved searches, followed tags, blacklist tags and "
+                          "download history to yours and keeps your other settings.<br><br><b>Replace</b> takes "
+                          "everything from the file: your favorites and settings become the file's.<br><br>"
+                          "Changes not yet saved in this Settings window are discarded.", parent=self)
+        merge = box.addButton("Merge", QMessageBox.AcceptRole)
+        replace = box.addButton("Replace", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(merge)
+        box.exec()
+        if box.clickedButton() in (merge, replace):
+            self.import_request = (path, "merge" if box.clickedButton() is merge else "replace")
+            self.reject()  # the window imports once Settings is closed (Settings would save its older copy)
+
+
     def result_cfg(self) -> dict:
         return dict(self._cfg)
+
+
+class ExportDialog(QDialog):
+    """What to put in a backup besides favorites and settings."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export backup")
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint_label("Your favorites, saved searches, followed tags, blacklists and settings go in the "
+                                 "file. Add these too if you like:"))
+        self.history_check = QCheckBox("Download history (the green ↓ marks)")
+        self.history_check.setChecked(True)
+        self.login_check = QCheckBox("My logins (rule34.xxx User ID and API key, e-hentai login)")
+        warn = hint_label("Logins are stored in the file as plain text, readable by anyone who gets the file. "
+                          "Keep it private.")
+        warn.setVisible(False)
+        self.login_check.toggled.connect(warn.setVisible)
+        for w in (self.history_check, self.login_check, warn):
+            lay.addWidget(w)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Export…")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)

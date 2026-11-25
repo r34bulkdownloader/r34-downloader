@@ -277,3 +277,21 @@ def test_settings_rejects_invalid_template_on_other_site(qapp, monkeypatch):
     d.site_box.setCurrentIndex(d.site_box.findData("rule34.xxx"))
     d.accept()
     assert d.result() != dialogs.QDialog.Accepted and d.site_box.currentData() == "e-hentai"
+
+
+def test_settings_tabs_and_a_mistake_shows_its_tab(qapp, monkeypatch):
+    from PySide6.QtWidgets import QDialog, QMessageBox
+    from r34dl.dialogs import SettingsDialog
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: None)
+    dlg = SettingsDialog({**config.DEFAULTS}, None)
+    assert [dlg.pages.tabText(i) for i in range(dlg.pages.count())] == [
+        "Accounts", "Downloads", "Appearance && behaviour", "Backup"]
+    dlg.pages.setCurrentIndex(3)
+    dlg.eh_member_edit.setText("42")  # only one of the two login fields
+    dlg.accept()
+    assert dlg.result() != QDialog.Accepted and dlg.pages.currentIndex() == 0
+    dlg.eh_member_edit.setText("")
+    dlg.pages.setCurrentIndex(3)
+    dlg.template_edit.setText("{nope}")
+    dlg.accept()
+    assert dlg.pages.currentIndex() == 1

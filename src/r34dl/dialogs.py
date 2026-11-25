@@ -14,7 +14,7 @@ from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
-    QVBoxLayout,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import api, config, log as applog, naming, secret, theme
@@ -154,8 +154,15 @@ class SettingsDialog(QDialog):
             700001004, "", "", "", "", [], "", 0, 0, 0, site="e-hentai", kind="page", file_name="004.jpg",
             album={"gid": 7, "token": "", "title": "Some Album", "page": 4, "pages": 120, "category": ""})
         outer = QVBoxLayout(self)
+        self.pages = QTabWidget()  # one tab per topic instead of one column as tall as the screen
+        outer.addWidget(self.pages)
+        tabs = {}
+        for name in ("Accounts", "Downloads", "Appearance && behaviour", "Backup"):
+            page = QWidget()
+            tabs[name] = QVBoxLayout(page)
+            self.pages.addTab(page, name)
 
-        account = QGroupBox("Account")
+        account = QGroupBox("rule34.xxx account")
         form = QFormLayout(account)
         self.paste_edit = QLineEdit()
         self.paste_edit.setPlaceholderText("&api_key=…&user_id=…")
@@ -207,7 +214,7 @@ class SettingsDialog(QDialog):
         form.addRow(self.pw_hint)
         self._account_form = form
         self._update_password_rows()
-        outer.addWidget(account)
+        tabs["Accounts"].addWidget(account)
 
         eh = QGroupBox("e-hentai login (optional)")
         form = QFormLayout(eh)
@@ -227,9 +234,9 @@ class SettingsDialog(QDialog):
             "developer tools (F12) → <b>Storage</b> (Firefox) or <b>Application</b> (Chrome) → <b>Cookies</b>, and "
             "copy the values of <b>ipb_member_id</b> and <b>ipb_pass_hash</b>. They are saved only on this "
             "computer and can be protected with the password above."))
-        outer.addWidget(eh)
+        tabs["Accounts"].addWidget(eh)
 
-        downloads = QGroupBox("Downloads")
+        downloads = QGroupBox("Saving files")
         form = QFormLayout(downloads)
         self.dir_edit = QLineEdit(api.home_short(cfg["save_dir"]))  # ~ instead of the login name; expanded on save
         browse = QPushButton("Browse…")
@@ -266,7 +273,7 @@ class SettingsDialog(QDialog):
         form.addRow("Example", self.preview)
         self.template_edit.textChanged.connect(self._update_preview)
         self.dir_edit.textChanged.connect(self._update_preview)
-        outer.addWidget(downloads)
+        tabs["Downloads"].addWidget(downloads)
 
         blacklist = QGroupBox("Blacklist")
         bll = QVBoxLayout(blacklist)
@@ -289,7 +296,7 @@ class SettingsDialog(QDialog):
         bll.addWidget(hint_label(
             "Posts with any of these tags are never shown, in every search tab on that site. Same rules as the tag boxes. "
             "A blacklisted tag you put in a search's Include box is allowed for that search."))
-        outer.addWidget(blacklist)
+        tabs["Downloads"].addWidget(blacklist)
 
         appearance = QGroupBox("Appearance")
         apl = QHBoxLayout(appearance)
@@ -300,7 +307,7 @@ class SettingsDialog(QDialog):
         self.theme_box.setCurrentIndex(max(0, self.theme_box.findData(cfg.get("theme", "system"))))
         self.theme_box.currentIndexChanged.connect(lambda _: theme.apply(self.theme_box.currentData()))  # preview
         apl.addWidget(self.theme_box, 1)
-        outer.addWidget(appearance)
+        tabs["Appearance && behaviour"].addWidget(appearance)
 
         behaviour = QGroupBox("Behaviour")
         bl = QVBoxLayout(behaviour)
@@ -335,7 +342,7 @@ class SettingsDialog(QDialog):
         self.loop_check = QCheckBox("Loop videos")
         self.loop_check.setChecked(bool(cfg.get("loop_videos", True)))
         bl.addWidget(self.loop_check)
-        outer.addWidget(behaviour)
+        tabs["Appearance && behaviour"].addWidget(behaviour)
 
         backup_box = QGroupBox("Backup")
         bk = QVBoxLayout(backup_box)
@@ -350,7 +357,9 @@ class SettingsDialog(QDialog):
         bk_row.addWidget(import_btn)
         bk_row.addStretch(1)
         bk.addLayout(bk_row)
-        outer.addWidget(backup_box)
+        tabs["Backup"].addWidget(backup_box)
+        for lay in tabs.values():
+            lay.addStretch(1)  # sections sit at the top of their tab
         self.import_request: tuple[str, str] | None = None  # (file, "merge"/"replace"), done by the window
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -506,14 +515,17 @@ class SettingsDialog(QDialog):
         self._store_template()
         if (bad := self._bad_site()) is not None:
             self.site_box.setCurrentIndex(self.site_box.findData(bad))  # shows its error in the preview
+            self.pages.setCurrentIndex(1)  # Downloads
             QMessageBox.warning(self, "Bad filename template", f"The file name for {bad} is not valid.")
             return
         eh_login = self.eh_member_edit.text().strip(), self.eh_hash_edit.text().strip()
         if not all(re.fullmatch(r"[\w-]*", v) for v in eh_login):  # cookie values: no spaces or ; (ehclient)
+            self.pages.setCurrentIndex(0)  # Accounts
             QMessageBox.warning(self, "e-hentai login", "The Member ID and Pass hash are made of letters, digits, "
                                 "- and _ only. Copy just the cookie values.")
             return
         if all(eh_login) != any(eh_login):
+            self.pages.setCurrentIndex(0)
             QMessageBox.warning(self, "e-hentai login", "Fill in both the Member ID and the Pass hash, or leave both "
                                 "empty.")
             return
@@ -534,6 +546,7 @@ class SettingsDialog(QDialog):
             sharp_thumbs=self.sharp_check.isChecked(),
         )
         if not self._apply_protection():
+            self.pages.setCurrentIndex(0)  # the password fields are on Accounts
             return
         for w in (self.cur_pw, self.new_pw, self.new_pw2):
             w.clear()  # don't keep password text around

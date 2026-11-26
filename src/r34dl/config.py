@@ -32,6 +32,7 @@ DEFAULTS = {
     "saved_searches": {},  # name -> {"include": str, "exclude": str}
     "followed": [],  # followed tags, one-click searches in the Searches menu
     "hide_downloaded": False,
+    "download_speed": "polite",  # or "fast": more at once and e-hentai at the userscript's pace (downloader.SPEEDS)
     "blacklist": "",  # tags excluded from every search, same syntax as the tag boxes
     "slideshow": dict(SLIDESHOW),  # last slideshow options; missing or bad values fall back one by one
     "sites": {},  # per-site settings for every site except rule34.xxx (see SITE_DEFAULTS, site_cfg)
@@ -117,6 +118,8 @@ def normalize(data) -> dict:
     }
     cfg["slideshow"] = slideshow_options(cfg["slideshow"])
     cfg["sites"] = {k: v for k, v in cfg["sites"].items() if isinstance(v, dict)}
+    if cfg["download_speed"] not in ("polite", "fast"):
+        cfg["download_speed"] = DEFAULTS["download_speed"]
     return cfg
 
 

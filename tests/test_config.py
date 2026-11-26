@@ -295,3 +295,8 @@ def test_settings_tabs_and_a_mistake_shows_its_tab(qapp, monkeypatch):
     dlg.template_edit.setText("{nope}")
     dlg.accept()
     assert dlg.pages.currentIndex() == 1
+
+
+def test_unknown_download_speed_falls_back_to_polite():
+    assert config.normalize({"download_speed": "ludicrous"})["download_speed"] == "polite"
+    assert config.normalize({"download_speed": "fast"})["download_speed"] == "fast"

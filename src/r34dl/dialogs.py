@@ -273,6 +273,15 @@ class SettingsDialog(QDialog):
         form.addRow("Example", self.preview)
         self.template_edit.textChanged.connect(self._update_preview)
         self.dir_edit.textChanged.connect(self._update_preview)
+        self.speed_box = QComboBox()
+        self.speed_box.addItem("Polite", "polite")
+        self.speed_box.addItem("Fast", "fast")
+        self.speed_box.setCurrentIndex(max(0, self.speed_box.findData(cfg.get("download_speed", "polite"))))
+        form.addRow("Download speed", self.speed_box)
+        form.addRow(hint_label(
+            "<b>Polite</b>: 3 downloads at once; e-hentai one page a second. <b>Fast</b>: 5 to 16 at once, as the connection "
+            "allows; e-hentai a page every 0.1 s, 6 at a time, and it keeps retrying when the site says to slow down. Fast can get you "
+            "throttled or your IP address blocked for a while."))
         tabs["Downloads"].addWidget(downloads)
 
         blacklist = QGroupBox("Blacklist")
@@ -543,7 +552,7 @@ class SettingsDialog(QDialog):
             remember_include=self.remember_check.isChecked(), hide_downloaded=self.hide_check.isChecked(),
             infinite_scroll=self.infinite_check.isChecked(),
             theme=self.theme_box.currentData(), hover_preview=self.hover_check.isChecked(),
-            sharp_thumbs=self.sharp_check.isChecked(),
+            sharp_thumbs=self.sharp_check.isChecked(), download_speed=self.speed_box.currentData(),
         )
         if not self._apply_protection():
             self.pages.setCurrentIndex(0)  # the password fields are on Accounts

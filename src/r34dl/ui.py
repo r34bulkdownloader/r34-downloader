@@ -30,7 +30,7 @@ from .gallery import GalleryTab
 from .grid import ResultsModel
 from .search import FavoritesTab, SearchTab
 from .sites import Site, make_sites
-from .sites.ehclient import EH_GAP_MS, EH_WARN_PICTURES, EhDownloadFeeder
+from .sites.ehclient import EH_WARN_PICTURES, EhDownloadFeeder
 from .slideshow import Slideshow, SlideshowDialog
 from .together import TogetherTab
 from .viewer import ViewerTab, resolve_error
@@ -113,13 +113,15 @@ class MainWindow(QMainWindow):
         self.downloader.item_done.connect(self._on_item_done)
         self.downloader.item_done.connect(self._album_progress)
         self._vault: secret.Vault | None = None  # unlocked password key (never written anywhere)
-        self._eh_login()
+        self._apply_net_settings()
         if self.cfg["secret"] or not self.cfg["user_id"] or not self.cfg["api_key"]:
             QTimer.singleShot(0, self, self._startup)
 
-    def _eh_login(self):
+    def _apply_net_settings(self):
         sc = config.site_cfg(self.cfg, "e-hentai")
         self.sites["e-hentai"].queue.set_login(sc["member_id"], sc["pass_hash"])
+        self.sites["e-hentai"].queue.set_speed(self.cfg["download_speed"])
+        self.downloader.set_speed(self.cfg["download_speed"])
 
     def _startup(self):
         """Unlock protected credentials first; ask for credentials if there are none. Runs once."""
@@ -136,11 +138,11 @@ class MainWindow(QMainWindow):
                                                              pass_hash=creds.pop("eh_pass_hash", ""))
                 self.cfg.update(creds)
                 self._vault = vault
-                self._eh_login()
+                self._apply_net_settings()
             elif r == UnlockDialog.FORGOT:
                 self.cfg.update(secret={}, user_id="", api_key="")
                 config.site_cfg(self.cfg, "e-hentai").update(member_id="", pass_hash="")
-                self._eh_login()
+                self._apply_net_settings()
                 try:
                     config.save(self.cfg, unprotect=True)
                 except OSError as e:
@@ -421,7 +423,7 @@ class MainWindow(QMainWindow):
         if accepted:
             self.cfg = dlg.result_cfg()  # not config.load(): protected credentials are only in memory
             self._vault = dlg.vault
-            self._eh_login()
+            self._apply_net_settings()
             self._refresh_settings_labels()
             for tab in self.search_tabs():
                 if isinstance(tab, FavoritesTab):
@@ -470,7 +472,7 @@ class MainWindow(QMainWindow):
             return
         self.cfg = new
         theme.apply(self.cfg["theme"])
-        self._eh_login()
+        self._apply_net_settings()
         self._refresh_settings_labels()
         for site in self.sites:
             self._load_favorites(config.load_favorites(site), site)
@@ -642,11 +644,11 @@ class MainWindow(QMainWindow):
         n = self._pictures([p for p in posts if p.site == "e-hentai"])  # a gallery counts its pages
         if n <= EH_WARN_PICTURES:
             return True
-        minutes = math.ceil(n * (2 * EH_GAP_MS) / 60000)
+        minutes = math.ceil(n * (2 * self.sites["e-hentai"].queue.gap_ms) / 60000)
         return QMessageBox.question(
             self, "Download from e-hentai",
             f"Download {n} pictures from e-hentai? This uses your image limit (originals use more) and takes about "
-            f"{minutes} minutes at a polite pace.") == QMessageBox.Yes
+            f"{minutes} minute{'s' if minutes != 1 else ''} at the {self.cfg['download_speed'].title()} download speed.") == QMessageBox.Yes
 
     def _expand(self, posts: list[Post], cb):
         """Galleries become their pages (listed one gallery at a time, in order); then cb(posts)."""

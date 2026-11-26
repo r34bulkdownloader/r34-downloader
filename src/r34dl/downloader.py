@@ -1,6 +1,7 @@
 import itertools
 import logging
 import os
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -12,19 +13,24 @@ from .sites.ehentai import safe_image_url
 
 log = logging.getLogger(__name__)
 
-CONCURRENCY = 3
-RETRY_DELAYS = (1000, 2000, 4000)  # ms
+# Settings → Download speed: downloads at once, retry delays (ms). Fast follows the e-hentai userscript.
+SPEEDS = {"polite": (3, (1000, 2000, 4000)), "fast": (6, tuple(range(2000, 12000, 1000)))}
+# Fast, like the userscript's network observer: a download done in under 0.5 s allows one more at once, one
+# slower than 1.5 s one fewer, between 5 and 16.
+FAST_MIN, FAST_MAX, QUICK_S, SLOW_S = 5, 16, 0.5, 1.5
 
 
 _counter = itertools.count()
 
 
 class _Item:
-    def __init__(self, url: str, target: Path, headers: dict | None = None):
+    def __init__(self, url: str, target: Path, headers: dict | None = None, refresh=None):
         self.n = next(_counter)
         self.url = url  # as queued: item_done reports this one
         self.fetch_url = url  # where a redirect sent us
-        self.headers = headers or {}
+        self.headers = self.login_headers = headers or {}
+        self.refresh = refresh  # refresh(cb): looks the picture up again before a retry; cb(new address or None)
+        self.started = 0.0
         self.original = bool(headers)  # an e-hentai original: its answer may be the limit picture or a page
         self.target = target
         self.retries = 0
@@ -57,6 +63,7 @@ class Downloader(QObject):
         self._pending: list[_Item] = []
         self._running: list[_Item] = []  # includes items waiting for a retry
         self._failed: list[_Item] = []
+        self.set_speed("polite")
         self._done = 0
         self._total = 0
         self._gen = 0
@@ -66,9 +73,9 @@ class Downloader(QObject):
         return bool(self._pending or self._running)
 
     def add(self, items):
-        """items: (url, target) or (url, target, extra request headers)."""
-        for url, target, *headers in items:
-            self._pending.append(_Item(url, Path(target), *headers))
+        """items: (url, target), (url, target, extra request headers) or (url, target, headers or None, refresh)."""
+        for url, target, *extra in items:
+            self._pending.append(_Item(url, Path(target), *extra))
             self._total += 1
         self._pump()
 
@@ -92,6 +99,12 @@ class Downloader(QObject):
         self._total += len(items)
         self._pump()
 
+    def set_speed(self, speed: str) -> None:
+        self.fast = speed == "fast"
+        self.concurrency, self.retry_delays = SPEEDS["fast" if self.fast else "polite"]
+        if self._pending:
+            self._pump()
+
     def cancel(self):
         self._gen += 1
         for it in self._running:
@@ -106,7 +119,7 @@ class Downloader(QObject):
         self.progress.emit(self._done, self._total, len(self._running), len(self._failed))
 
     def _pump(self):
-        while self._pending and len(self._running) < CONCURRENCY:
+        while self._pending and len(self._running) < self.concurrency:
             it = self._pending.pop(0)
             self._running.append(it)
             self._start(it)
@@ -126,6 +139,7 @@ class Downloader(QObject):
             return
         it.written = 0
         it.error = ""
+        it.started = time.monotonic()
         req = request(it.fetch_url)
         for k, v in it.headers.items():
             req.setRawHeader(k, v)
@@ -171,7 +185,7 @@ class Downloader(QObject):
             if it.fetch_url.endswith("/509.gif"):
                 return self._limited(it)
             if not safe_image_url(it.fetch_url):
-                it.error, it.retries = "redirected to a refused address", len(RETRY_DELAYS)
+                it.error, it.retries = "redirected to a refused address", len(self.retry_delays)
                 return self._error(it)
             self._start(it)
             return
@@ -179,8 +193,9 @@ class Downloader(QObject):
         if err:
             it.error = err
             status = it.reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
-            if isinstance(status, int) and 400 <= status < 500 and status not in (408, 429):
-                it.retries = len(RETRY_DELAYS)  # gone or forbidden: asking again won't help
+            fresh = self.fast and it.refresh  # another address may well work
+            if isinstance(status, int) and 400 <= status < 500 and status not in (408, 429) and not fresh:
+                it.retries = len(self.retry_delays)  # gone or forbidden: asking again won't help
             self._close(it, remove=True)
             self._error(it)
             return
@@ -201,16 +216,29 @@ class Downloader(QObject):
             it.error = str(e)
             self._error(it)
             return
+        self._adapt(it)
         self.item_done.emit(it.url, str(it.target), True)
         self._finish(it, failed=False)
 
+    def _adapt(self, it: _Item):
+        if self.fast and it.started:
+            took = time.monotonic() - it.started
+            if took < QUICK_S:
+                self.concurrency = min(FAST_MAX, self.concurrency + 1)
+            elif took > SLOW_S:
+                self.concurrency = max(FAST_MIN, self.concurrency - 1)
+
     def _error(self, it: _Item):
-        if it.retries < len(RETRY_DELAYS):
+        self._adapt(it)
+        if it.retries < len(self.retry_delays):
             log.info("download retry %d: %s: %s", it.retries + 1, scrub(it.url), scrub(it.error))
-            delay = RETRY_DELAYS[it.retries]
+            delay = self.retry_delays[it.retries]
             it.retries += 1
             gen = self._gen
-            QTimer.singleShot(delay, self, lambda: self._retry(it, gen))
+            if self.fast and it.refresh:  # the userscript loads the picture's page again for a fresh address
+                QTimer.singleShot(delay, self, lambda: it.refresh(lambda url: self._refreshed(it, gen, url)))
+            else:
+                QTimer.singleShot(delay, self, lambda: self._retry(it, gen))
             return
         log.warning("download failed: %s: %s", scrub(it.url), scrub(it.error))
         self._finish(it, failed=True)  # first, so a listener's forget_failed() sees this item in the failed list
@@ -223,6 +251,16 @@ class Downloader(QObject):
         self._total -= 1
         (self.refused if refused else self.limited).emit(it.url, str(it.target))
         self._pump()
+
+    def _refreshed(self, it: _Item, gen: int, url):
+        if gen != self._gen or it not in self._running:
+            return
+        if isinstance(url, str) and safe_image_url(url):
+            it.fetch_url = url
+            # the login cookie only ever goes to e-hentai's own fullimg address (as when the item was added)
+            it.headers = it.login_headers if url.startswith("https://e-hentai.org/fullimg") else {}
+            it.original = bool(it.headers)
+        self._start(it)
 
     def _retry(self, it: _Item, gen: int):
         if gen == self._gen:

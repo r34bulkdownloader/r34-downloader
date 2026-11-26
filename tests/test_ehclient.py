@@ -50,7 +50,7 @@ class FakeNam:
         key = next(k for k in self.routes if k in url)
         r = self.routes[key]
         status, data = r.pop(0) if isinstance(r, list) else r
-        reply = FakeReply(url, status, data)
+        reply = FakeReply(url, status, data, QNetworkReply.TimeoutError if status is None else QNetworkReply.NoError)
 
         def fin():
             self.open -= 1
@@ -100,8 +100,12 @@ def test_queue_paces_requests(qapp):
 
 def test_queue_defaults_and_login_cookie(qapp):
     q = EhQueue(nam=FakeNam({}))
-    assert (q.gap_ms, q.burst_pause_ms, q.retry_delays_ms) == (1000, 5000, api.RETRY_DELAYS_MS)
-    assert ehclient.EH_BURST == 4
+    assert (q.gap_ms, q.parallel, q.burst, q.burst_pause_ms, q.retry_delays_ms) == (1000, 1, 4, 5000, api.RETRY_DELAYS_MS)
+    q.set_speed("fast")  # the userscript's pace
+    assert (q.gap_ms, q.parallel, q.burst, q.fast) == (100, 6, 0, True)
+    assert q.retry_delays_ms == (2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000)
+    q.set_speed("polite")
+    assert q.gap_ms == 1000 and not q.fast
     q.set_login("9", "abc")
     assert q.logged_in and q._cookie == b"ipb_member_id=9; ipb_pass_hash=abc; nw=1"
     q.set_login("9", "a;b")  # header injection / junk is not a login
@@ -115,6 +119,26 @@ def test_queue_retries_busy_then_succeeds(qapp):
     q.get("https://e-hentai.org/x", lambda s, b, e: got.append((s, b, e)))
     spin_until(lambda: got)
     assert got == [(200, b"ok", "")] and len(nam.sent) == 3
+
+
+def test_fast_queue_retries_too_fast_pages_and_network_errors(qapp):
+    nam = FakeNam({"e-hentai.org": [(200, b"You are opening pages too fast"), (None, b""), (200, b"ok")]})
+    q = EhQueue(nam=nam)
+    q.set_speed("fast")
+    q.retry_delays_ms = (10, 10, 10)
+    got = []
+    q.get("https://e-hentai.org/x", lambda s, b, e: got.append((b, e)))
+    spin_until(lambda: got)
+    assert got == [(b"ok", "")] and len(nam.sent) == 3
+
+
+def test_polite_queue_does_not_retry_a_too_fast_page(qapp):
+    nam = FakeNam({"e-hentai.org": [(200, b"You are opening pages too fast"), (200, b"ok")]})
+    q = fast(EhQueue(nam=nam))
+    got = []
+    q.get("https://e-hentai.org/x", lambda s, b, e: got.append(e))
+    spin_until(lambda: got)
+    assert got == [ehclient.BLOCKED_MSG] and len(nam.sent) == 1
 
 
 def test_queue_rejects_offsite_redirect(qapp):
@@ -308,6 +332,7 @@ class FakeDownloader(QObject):
     def __init__(self):
         super().__init__()
         self.added = []
+        self.concurrency = 6
 
     def add(self, items):
         self.added += items
@@ -340,7 +365,7 @@ def _pages(n):
     return out
 
 
-def test_feeder_one_at_a_time(qapp, tmp_path):
+def test_feeder_one_at_a_time(qapp, tmp_path, monkeypatch):
     site, dl = FakeSite(), FakeDownloader()
     f = ehclient.EhDownloadFeeder(site, dl)
     f.add([(p, tmp_path / f"{i}.jpg") for i, p in enumerate(_pages(3))])
@@ -356,7 +381,17 @@ def test_feeder_one_at_a_time(qapp, tmp_path):
     assert len(site.calls) == 3 and not f.active
 
 
-def test_feeder_pauses_on_509(qapp, tmp_path):
+def test_feeder_works_on_six_pictures_at_once(qapp, tmp_path):
+    site, dl = FakeSite(), FakeDownloader()
+    site.queue.set_speed("fast")
+    f = ehclient.EhDownloadFeeder(site, dl)
+    f.add([(p, tmp_path / f"{i}.jpg") for i, p in enumerate(_pages(8))])
+    assert len(site.calls) == len(dl.added) == 6 and f.waiting == 2
+    dl.finish()
+    assert len(site.calls) == 7 and f.waiting == 1
+
+
+def test_feeder_pauses_on_509(qapp, tmp_path, monkeypatch):
     site, dl = FakeSite(), FakeDownloader()
     f = ehclient.EhDownloadFeeder(site, dl)
     pages = _pages(3)
@@ -412,7 +447,7 @@ def test_large_batch_asks(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.No)
     win.download_posts(_pages(201))
     assert len(asked) == 1 and asked[0].startswith("Download 201 pictures from e-hentai?")
-    assert "about 7 minutes" in asked[0]
+    assert "about 7 minutes at the Polite download speed" in asked[0]
     assert not win.feeder.active and not win.downloader.active
     gal = _page()
     gal.kind, gal.album = "gallery", {"gid": 1, "token": "t", "title": "T", "pages": 300}
@@ -462,7 +497,7 @@ def test_cookie_only_goes_to_e_hentai_fullimg(qapp, tmp_path):
     assert dl.added == [("https://attacker.example/x", tmp_path / "a.png")]  # no Cookie header
 
 
-def test_feeder_pauses_when_the_downloader_reports_the_limit(qapp, tmp_path):
+def test_feeder_pauses_when_the_downloader_reports_the_limit(qapp, tmp_path, monkeypatch):
     site, dl = FakeSite(), FakeDownloader()
     f = ehclient.EhDownloadFeeder(site, dl)
     pages = _pages(2)
@@ -548,3 +583,48 @@ def test_feeder_names_the_file_by_the_type_it_got(qapp, tmp_path):
     dl.finish()
     f.add([(_pages(2)[1], tmp_path / "ehentai_1_002.jpg")])  # same type: kept
     assert dl.added[1][1] == tmp_path / "ehentai_1_002.jpg" and len(moved) == 1
+
+
+def test_fast_feeder_skips_a_too_fast_picture_instead_of_pausing(qapp, tmp_path):
+    site, dl = FakeSite(), FakeDownloader()
+    site.queue.set_speed("fast")
+    f = ehclient.EhDownloadFeeder(site, dl)
+    pages = _pages(2)
+    site.answers[pages[0].id] = ehclient.BLOCKED_MSG
+    paused, failed = [], []
+    f.paused.connect(paused.append)
+    f.failed.connect(lambda page, target: failed.append(target))
+    f.add([(p, tmp_path / f"{i}.jpg") for i, p in enumerate(pages)])
+    assert not paused and failed == [str(tmp_path / "0.jpg")] and len(dl.added) == 1  # left for Retry failed
+
+
+def test_download_speed_setting_reaches_the_queue_and_downloader(qapp, tmp_path, monkeypatch):
+    from r34dl import config
+    from r34dl.ui import MainWindow
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.save({**config.DEFAULTS, "user_id": "1", "api_key": "k", "download_speed": "fast"})
+    win = MainWindow()
+    assert win.sites["e-hentai"].queue.parallel == 6 and win.downloader.concurrency == 6
+    win.cfg["download_speed"] = "polite"
+    win._apply_net_settings()
+    assert win.sites["e-hentai"].queue.parallel == 1 and win.downloader.concurrency == 3
+
+
+def test_fast_feeder_looks_the_page_up_again_for_a_retry(qapp, tmp_path):
+    site, dl = FakeSite(), FakeDownloader()
+    site.queue.set_speed("fast")
+    dl.concurrency = 9
+    f = ehclient.EhDownloadFeeder(site, dl)
+    f.add([(p, tmp_path / f"{i}.jpg") for i, p in enumerate(_pages(12))])
+    assert len(dl.added) == 9  # as many as the downloader runs at once
+    url, target, headers, refresh = dl.added[0]
+    got = []
+    refresh(got.append)
+    assert got == [url] and len(site.calls) == 10  # its page asked again
+
+
+def test_polite_feeder_gives_no_page_lookup_for_retries(qapp, tmp_path):
+    site, dl = FakeSite(), FakeDownloader()
+    f = ehclient.EhDownloadFeeder(site, dl)
+    f.add([(_pages(1)[0], tmp_path / "0.jpg")])
+    assert len(dl.added[0]) == 2

@@ -82,7 +82,7 @@ def server():
 
 @pytest.fixture(autouse=True)
 def fast_retries(monkeypatch):
-    monkeypatch.setattr(downloader, "RETRY_DELAYS", (0, 0, 0))
+    monkeypatch.setitem(downloader.SPEEDS, "polite", (3, (0, 0, 0)))
 
 
 def spin_until(cond, timeout=10):
@@ -159,9 +159,9 @@ def test_cancel_removes_part(qapp, server, tmp_path):
 def test_concurrency_cap(qapp, server, tmp_path):
     d = Downloader()
     d.add([(server.url + "/slow", tmp_path / f"{i}.jpg") for i in range(10)])
-    assert spin_until(lambda: server.max_open >= 3)
+    assert spin_until(lambda: server.max_open >= d.concurrency == 3)
     spin_until(lambda: False, 0.4)
-    assert server.max_open == 3
+    assert server.max_open == d.concurrency
     d.cancel()
 
 
@@ -255,3 +255,31 @@ def test_original_redirected_on_to_a_509_picture_is_limited(qapp, server, tmp_pa
     d.add([(server.url + "/tolimit", tmp_path / "a.jpg", {b"Cookie": b"c=1"})])
     run_until_finished(d)
     assert limited == [] and (tmp_path / "a.jpg").exists()  # a gif that isn't /509.gif is a picture
+
+
+def test_fast_retry_downloads_from_the_fresh_address(qapp, server, tmp_path, local_ok, monkeypatch):
+    monkeypatch.setitem(downloader.SPEEDS, "fast", (6, (0, 0, 0)))
+    d = Downloader()
+    d.set_speed("fast")
+    asked = []
+    d.add([(server.url + "/404", tmp_path / "a.jpg", None, lambda cb: asked.append(1) or cb(server.url + "/ok"))])
+    run_until_finished(d)
+    assert asked == [1] and server.hits_404 == 1 and (tmp_path / "a.jpg").read_bytes() == b"x" * 100
+
+
+def test_fast_download_count_adapts_between_5_and_16(qapp, tmp_path):
+    d = Downloader()
+    d.set_speed("fast")
+    it = downloader._Item("https://x/a.jpg", tmp_path / "a.jpg")
+    for _ in range(20):
+        it.started = time.monotonic()  # done at once
+        d._adapt(it)
+    assert d.concurrency == downloader.FAST_MAX == 16
+    for _ in range(20):
+        it.started = time.monotonic() - 2  # slow
+        d._adapt(it)
+    assert d.concurrency == downloader.FAST_MIN == 5
+    d.set_speed("polite")
+    it.started = time.monotonic()
+    d._adapt(it)
+    assert d.concurrency == 3  # Polite never adapts

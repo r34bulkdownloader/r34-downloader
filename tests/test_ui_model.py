@@ -989,7 +989,7 @@ def test_open_together_and_step_through_selection(fresh, monkeypatch):
 def test_zip_last_item_failing_leaves_nothing_to_retry(qapp, tmp_path, monkeypatch):
     """Real downloader: the failed item must be forgotten, or "Retry failed" would recreate the temp folder."""
     from r34dl import downloader as dl
-    monkeypatch.setattr(dl, "RETRY_DELAYS", ())
+    monkeypatch.setitem(dl.SPEEDS, "polite", (3, ()))
     win = ui.MainWindow()
     win.cfg["save_dir"] = str(tmp_path)
     monkeypatch.setattr(ui.QInputDialog, "getText", staticmethod(lambda *a, **k: ("set", True)))

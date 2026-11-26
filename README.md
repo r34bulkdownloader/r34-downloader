@@ -6,7 +6,7 @@ reasonably recent distribution without installing anything.
 
 **18+ only.** This is a tool for an adult website.
 
-Current version: **1.3.0**
+Current version: **1.4.0**
 
 ![Search tab: tag boxes on the left, results grid with tick boxes, favorite and downloaded marks](screenshots/search.png)
 
@@ -78,7 +78,7 @@ Current version: **1.3.0**
 - Fullscreen and the slideshow keep the screen from blanking while open.
 
 ### Downloading
-- **Download N** downloads the ticked posts. Three downloads run at once, failed ones are retried, and the
+- **Download N** downloads the ticked posts. Three downloads run at once (5 to 16 at the Fast download speed), failed ones are retried, and the
   status bar has **Retry failed** and **Cancel**.
 - **Download as folder…** or **Download as ZIP…** (the arrow on the Download button) saves the ticked posts as
   one numbered album. The name is suggested from the shared artist.
@@ -129,12 +129,19 @@ Pick **e-hentai** in the site picker above the tag boxes. Everything works witho
 - **Download** ticked pages, ticked galleries (all their pages), or a gallery as one folder or ZIP. Files are
   named `ehentai_<gallery>_<page>` by default. Favorites and the download history are kept per site.
 
-**Pacing and image limits.** The app talks to e-hentai one request at a time, at least a second apart, with a
-5-second pause after every 4 requests, and backs off when the site says it's busy. Every picture costs one page
-load plus the picture, so a 100-page gallery takes a few minutes. e-hentai counts the pictures you view against an
+**Pacing and image limits.** **Settings → Downloads → Download speed** picks the pace:
+- **Polite** (default): one e-hentai request at a time, at least a second apart, with a 5-second pause after
+  every 4 requests. A 100-page gallery takes a few minutes.
+- **Fast**: the pace of the popular e-hentai downloader userscript. A page request every 0.1 s, 6 at a time.
+  Downloads start at 6 at once and adapt to the connection: a quick one allows one more, a slow one one fewer,
+  between 5 and 16. When the site says to slow down (busy, "too fast", or a network error), each request is
+  retried up to 10 times, 2 s, 3 s, … 11 s apart; a failed picture's page is loaded again first, for a fresh
+  address. A picture that still fails is skipped and left for **Retry failed**. Fast can get you throttled or your
+  IP address blocked for a while; that's your call.
+
+Every picture costs one page load plus the picture. e-hentai counts the pictures you view against an
 image limit (per IP address, or per account when logged in); when it's reached, downloads pause and the status bar
-has **Resume e-hentai downloads** for later. Downloads of more than 200 pictures ask first. If e-hentai says pages are opened too
-fast, the app stops for a while; downloads pause too.
+has **Resume e-hentai downloads** for later. Downloads of more than 200 pictures ask first. At the Polite speed, if e-hentai says pages are opened too fast, the app stops for a while; downloads pause too.
 
 **Optional login (originals).** Without a login, downloads save the resized copy the site shows (usually up to
 1280 px wide). With a login, downloads save the original file when the page offers one (viewing and the slideshow
@@ -207,4 +214,4 @@ This project isn't affiliated with rule34.xxx or e-hentai.org. Follow the site's
 
 ## Plans
 
-See [TODO.md](TODO.md): other boorus and exhentai.org.
+See [TODO.md](TODO.md): other boorus.

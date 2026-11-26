@@ -14,9 +14,13 @@ from ..models import Post
 from . import Site
 from . import ehentai as eh
 
-EH_GAP_MS = 1000
-EH_BURST_PAUSE_MS = 5000
-EH_BURST = 4
+# Settings → Download speed. "fast" is the pace of the widely used "[E/Ex-Hentai] Downloader" userscript:
+# a page request every 100 ms, 6 at a time, and when throttled up to 10 retries 2 s, 3 s, … 11 s apart.
+# parallel: e-hentai requests in flight, and pictures the feeder works on at once.
+SPEEDS = {
+    "polite": dict(gap_ms=1000, parallel=1, burst=4, burst_pause_ms=5000, retry_delays_ms=api.RETRY_DELAYS_MS),
+    "fast": dict(gap_ms=100, parallel=6, burst=0, burst_pause_ms=0, retry_delays_ms=tuple(range(2000, 12000, 1000))),
+}
 EH_WARN_PICTURES = 200  # a bigger download batch asks first
 CANCELLED = "cancelled"  # error given to a job whose alive() said it is no longer wanted
 WARNING_MSG = "This gallery is behind a content warning that the app couldn't skip."
@@ -32,16 +36,16 @@ log = logging.getLogger(__name__)
 
 
 class EhQueue(QObject):
-    """One e-hentai request at a time, EH_GAP_MS apart, EH_BURST_PAUSE_MS after every EH_BURST, with a backoff on
-    429/503. cb(status or None, body, error) where error "" means success."""
+    """Up to `parallel` e-hentai requests at once, sent gap_ms apart (burst_pause_ms after every `burst`), with a
+    backoff on 429/503; at the fast speed also on network errors and "too fast" pages, as the userscript does. cb(status or None, body, error) where error "" means success."""
 
     def __init__(self, parent=None, nam=None):
         super().__init__(parent)
         self._nam = nam or QNetworkAccessManager(self)
-        self.gap_ms, self.burst_pause_ms, self.retry_delays_ms = EH_GAP_MS, EH_BURST_PAUSE_MS, api.RETRY_DELAYS_MS
+        self.set_speed("polite")
         self._jobs: deque = deque()  # (url, body or None, cb, attempt, alive or None)
         self._low: deque = deque()  # download jobs: sent only when nothing else waits (viewing comes first)
-        self._busy = False
+        self._in_flight = 0
         self._sent = 0
         self._next_at = 0.0  # monotonic seconds before which nothing is sent
         self._timer = QTimer(self)
@@ -53,6 +57,11 @@ class EhQueue(QObject):
         ok = all(re.fullmatch(r"[\w-]+", str(v)) for v in (member_id, pass_hash))  # no header injection
         self.logged_in = ok
         self._cookie = f"ipb_member_id={member_id}; ipb_pass_hash={pass_hash}; nw=1".encode() if ok else b"nw=1"
+
+    def set_speed(self, speed: str) -> None:
+        self.fast = speed == "fast"
+        for k, v in SPEEDS["fast" if self.fast else "polite"].items():
+            setattr(self, k, v)
 
     def get(self, url: str, cb, low: bool = False, alive=None) -> None:
         """alive(): checked just before sending; once it says False the job is dropped, cb gets CANCELLED."""
@@ -69,20 +78,22 @@ class EhQueue(QObject):
         self._pump()
 
     def _pump(self) -> None:
-        while True:
-            if self._busy or not (self._jobs or self._low):
-                return
+        while self._in_flight < self.parallel and (self._jobs or self._low):
             wait_ms = (self._next_at - time.monotonic()) * 1000
             if wait_ms > 0:
                 self._timer.start(int(wait_ms) + 1)
                 return
-            url, body, cb, attempt, alive = job = (self._jobs or self._low).popleft()
-            if alive is None or alive():
-                break
-            cb(None, b"", CANCELLED)  # e.g. the viewer moved on: no paced request is spent on it
-        self._busy = True
+            job = (self._jobs or self._low).popleft()
+            if job[4] is not None and not job[4]():
+                job[2](None, b"", CANCELLED)  # e.g. the viewer moved on: no paced request is spent on it
+                continue
+            self._send(job)
+
+    def _send(self, job) -> None:
+        url, body, cb, attempt, alive = job
+        self._in_flight += 1
         self._sent += 1
-        gap = self.burst_pause_ms if self._sent % EH_BURST == 0 else self.gap_ms
+        gap = self.burst_pause_ms if self.burst and self._sent % self.burst == 0 else self.gap_ms
         self._next_at = time.monotonic() + gap / 1000
         req = api.request(url)
         req.setRawHeader(b"Cookie", self._cookie)
@@ -97,10 +108,13 @@ class EhQueue(QObject):
     def _done(self, reply, job) -> None:
         url, body, cb, attempt, alive = job
         reply.deleteLater()
-        self._busy = False
+        self._in_flight -= 1
         status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
         data = bytes(reply.readAll())
-        if status in (429, 503) and attempt < len(self.retry_delays_ms):
+        blocked = len(data) < 4096 and any(t in data for t in _BLOCKED_TEXTS)  # real pages are far bigger
+        throttled = status in (429, 503) or (self.fast and (
+            blocked or (reply.error() != QNetworkReply.NoError and not (isinstance(status, int) and status < 500))))
+        if throttled and attempt < len(self.retry_delays_ms):
             log.info("e-hentai busy (HTTP %s), retry %d", status, attempt + 1)
             self._next_at = max(self._next_at, time.monotonic() + self.retry_delays_ms[attempt] / 1000)
             self._add((url, body, cb, attempt + 1, alive), front=True)
@@ -111,7 +125,7 @@ class EhQueue(QObject):
             err = "e-hentai redirected to another site."
         elif reply.error() != QNetworkReply.NoError:
             err = api.scrub(reply.errorString())
-        elif len(data) < 4096 and any(t in data for t in _BLOCKED_TEXTS):  # real pages are far bigger
+        elif blocked:
             err = BLOCKED_MSG
             self._next_at = max(self._next_at, time.monotonic() + EH_BLOCKED_PAUSE_MS / 1000)
         else:
@@ -266,8 +280,8 @@ class EhentaiSite(Site):
 
 
 class EhDownloadFeeder(QObject):
-    """Hands e-hentai pages to the downloader one at a time: resolve (paced by the site queue), download, and
-    only after that item_done the next. Originals get the login cookie; resized H@H copies never do."""
+    """Hands e-hentai pages to the downloader, the queue's `parallel` at a time: resolve (paced by the site queue), download,
+    and after an item_done the next. Originals get the login cookie; resized H@H copies never do."""
 
     paused = Signal(str)  # "IMAGE_LIMIT" or BLOCKED_MSG: stopped, the rest is kept until resume()
     failed = Signal(str, str)  # picture page, target: it couldn't be resolved (so ZIP jobs still complete)
@@ -278,8 +292,8 @@ class EhDownloadFeeder(QObject):
         super().__init__(parent)
         self.site, self.downloader = site, downloader
         self._jobs: deque = deque()  # (post, target path)
-        self._busy: str | bool = False  # True: resolving; a target text: downloading it
-        self._current = None  # the job being downloaded, kept for an image-limit answer
+        self._resolving = 0
+        self._active: dict[str, tuple] = {}  # target text -> (post, target) being downloaded, for limit answers
         self._posts: dict[str, Post] = {}  # target -> post, handed to the downloader and not done yet (for retry)
         self._unresolved: list = []  # (post, target) whose picture page couldn't be resolved
         self._paused = False
@@ -291,11 +305,11 @@ class EhDownloadFeeder(QObject):
 
     @property
     def active(self) -> bool:
-        return bool(self._jobs or self._busy)
+        return bool(self._jobs or self._resolving or self._active)
 
     @property
     def waiting(self) -> int:
-        return len(self._jobs) - (self._busy is True)
+        return len(self._jobs)
 
     def add(self, jobs) -> None:
         self._jobs.extend(jobs)
@@ -309,7 +323,9 @@ class EhDownloadFeeder(QObject):
         self._gen += 1  # a resolve still waiting in the site queue is dropped there, unsent
         self._jobs.clear()
         self._unresolved.clear()
-        self._busy = self._paused = self._no_originals = False
+        self._active.clear()
+        self._resolving = 0
+        self._paused = self._no_originals = False
 
     def retry_failed(self) -> None:
         """Failed pictures again, through the paced lookups: their addresses may have expired, and the
@@ -328,21 +344,44 @@ class EhDownloadFeeder(QObject):
         self._posts = {t: p for t, p in self._posts.items() if under not in Path(t).parents}
 
     def _next(self) -> None:
-        if self._busy or self._paused or not self._jobs:
-            return
-        post, target = self._jobs[0]
-        self._busy, gen = True, self._gen
-        self.site.resolve(post, True, lambda p, err: self._resolved(p, target, err, gen),
-                          alive=lambda: gen == self._gen)
+        while not self._paused and self._jobs and self._resolving + len(self._active) < self._limit():
+            post, target = self._jobs.popleft()
+            self._resolving += 1
+            gen = self._gen
+            self.site.resolve(post, True, lambda p, err, t=target, g=gen: self._resolved(p, t, err, g),
+                              alive=lambda g=gen: g == self._gen)
+
+    def _limit(self) -> int:
+        # Fast: as many as the downloader runs at once (it adapts 5–16); the queue still paces the page loads
+        return self.downloader.concurrency if self.site.queue.fast else self.site.queue.parallel
+
+    def _refresh(self, post: Post, cb) -> None:
+        """Before a Fast retry: the picture's page again, for a fresh address. cb(address or None)."""
+        post.album.pop("shown", None)
+        post.album.pop("original", None)
+        gen = self._gen
+
+        def done(p, err):
+            if err or gen != self._gen:
+                return cb(None)
+            if self._no_originals and p.file_url == p.album.get("original"):
+                p.file_url = p.album.get("shown") or p.file_url
+            cb(p.file_url)
+        self.site.resolve(post, True, done, alive=lambda: gen == self._gen)
+
+    def _pause(self, job, why: str) -> None:
+        self._jobs.appendleft(job)
+        if not self._paused:  # the other pictures in flight may answer the same
+            self._paused = True
+            self.paused.emit(why)
 
     def _resolved(self, post: Post, target, err, gen: int) -> None:
         if gen != self._gen:
             return
-        self._busy = False
-        if err in ("IMAGE_LIMIT", BLOCKED_MSG):  # going on would only make it worse
-            self._paused = True
-            return self.paused.emit(err)
-        self._jobs.popleft()
+        self._resolving -= 1
+        # going on would only make it worse; the fast speed, like the userscript, skips a "too fast" picture
+        if err == "IMAGE_LIMIT" or (err == BLOCKED_MSG and not self.site.queue.fast):
+            return self._pause((post, target), err)
         if err:
             log.warning("e-hentai picture not downloaded: %s", api.scrub(err))
             self._unresolved.append((post, target))
@@ -362,21 +401,20 @@ class EhDownloadFeeder(QObject):
         # the album may come from a favorites file: the login cookie only ever goes to e-hentai's fullimg
         original = (q.logged_in and post.file_url == post.album.get("original")
                     and post.file_url.startswith(eh.EH + "/fullimg"))
-        self._busy, self._current = str(target), (post, target)
+        self._active[str(target)] = (post, target)
         self._posts[str(target)] = post
-        self.downloader.add([(post.file_url, target, {b"Cookie": q._cookie})] if original else
-                            [(post.file_url, target)])
+        refresh = (lambda cb, p=post: self._refresh(p, cb)) if q.fast else None
+        item = (post.file_url, target, {b"Cookie": q._cookie} if original else None, refresh)
+        self.downloader.add([item if refresh else item[:3] if original else item[:2]])
 
     def _on_limited(self, url: str, target: str) -> None:
-        if self._busy and target == self._busy:
-            self._jobs.appendleft(self._current)
-            self._busy, self._paused = False, True
-            self.paused.emit("IMAGE_LIMIT")
+        if target in self._active:
+            self._pause(self._active.pop(target), "IMAGE_LIMIT")
 
     def _on_refused(self, url: str, target: str) -> None:
-        if not (self._busy and target == self._busy):
+        if target not in self._active:
             return
-        post, _ = self._current
+        post, _ = self._active.pop(target)
         shown = post.album.get("shown")
         if not self._no_originals:
             self._no_originals = True
@@ -384,7 +422,6 @@ class EhDownloadFeeder(QObject):
                         "Is the e-hentai login in Settings right?", api.scrub(post.page_url))
             self.originals_refused.emit()
         if not (isinstance(shown, str) and eh.safe_image_url(shown)):
-            self._busy = False
             self._posts.pop(target, None)
             self._unresolved.append((post, target))
             self.failed.emit(post.page_url, target)
@@ -395,6 +432,5 @@ class EhDownloadFeeder(QObject):
     def _on_item_done(self, url: str, target: str, ok: bool) -> None:
         if ok:
             self._posts.pop(target, None)
-        if self._busy and target == self._busy:
-            self._busy = False
+        if self._active.pop(target, None):
             self._next()

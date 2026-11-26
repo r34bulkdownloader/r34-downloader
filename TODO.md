@@ -17,7 +17,6 @@ Plans after 1.0. Nothing here is promised or scheduled.
 
 ## Ideas
 - Tag sidecar file: optional `.txt` with the post's tags next to each download.
-- Download speed limit / choice of how many downloads run at once.
 
 ## Known small issues
 - Downloader can announce "finished" twice in a rare nested case (nothing listens to it today).

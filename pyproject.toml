@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "r34dl"
-version = "1.3.0"
+version = "1.4.0"
 description = "Search, preview and bulk-download posts from rule34.xxx and e-hentai.org"
 license = "GPL-3.0-only"
 license-files = ["LICENSE"]

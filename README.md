@@ -6,7 +6,7 @@ reasonably recent distribution without installing anything.
 
 **18+ only.** This is a tool for an adult website.
 
-Current version: **1.3.0**
+Current version: **1.4.0**
 
 ![Search tab: tag boxes on the left, results grid with tick boxes, favorite and downloaded marks](screenshots/search.png)
 
